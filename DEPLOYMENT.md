@@ -1,6 +1,19 @@
 # AWS 없이 운영하는 PulseTube Radar
 
-현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현한 프런트엔드입니다. 샘플 스냅샷으로 모든 탐색·차트·퀴즈·테마 동작을 확인할 수 있습니다. 실데이터 운영에는 아래 데이터 계층을 연결합니다.
+현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현했습니다. Cloudflare Worker의 `/api/youtube/trending`이 YouTube Data API v3에서 대한민국 인기 영상 25개를 서버 측으로 조회하며, 15분 엣지 캐시와 샘플 데이터 폴백을 적용합니다.
+
+현재 구현된 범위:
+
+- `YT_API_KEY` Worker Runtime Secret
+- `videos.list(chart=mostPopular, regionCode=KR)` 서버 측 호출
+- 현재 순위·누적 조회수·좋아요·게시 이후 평균 조회 속도
+- 현재 스냅샷의 카테고리 점유율
+
+다음 단계 범위:
+
+- D1 시간별 스냅샷과 Cron Trigger
+- 직전 순위 대비 delta, 신규 진입·이탈, 실제 시간당 조회 증가량
+- 24시간·7일·30일 시계열
 
 ## 권장안: Cloudflare Workers + D1
 
@@ -40,10 +53,10 @@ src/
 
 - `YT_API_KEY`: Worker Secret
 - `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`: 선택, AI 브리핑용
-- D1 binding: `DB`
-- Cron: `0 * * * *`
+- D1 binding: `DB` (시계열 수집 단계)
+- Cron: `0 * * * *` (시계열 수집 단계)
 - 동일 시간 중복 수집을 막는 `UNIQUE(region, scope, captured_hour)` 제약
-- API 응답 `Cache-Control: public, max-age=60, stale-while-revalidate=300`
+- 현재 API 응답 `Cache-Control: public, max-age=300, s-maxage=900, stale-while-revalidate=3600`
 
 ## 대안: Vercel + Postgres
 

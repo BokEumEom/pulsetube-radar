@@ -14,6 +14,8 @@ export type TrendVideo = {
   tags: string[];
   aiNote: string;
   history: { time: string; rank: number; views: number }[];
+  publishedAt?: string;
+  source?: "youtube" | "demo";
 };
 
 export type TrendRow = {
@@ -212,6 +214,86 @@ export const rows: TrendRow[] = [
   { id: "global", group: "국가", label: "글로벌 교차", title: "한국과 글로벌에서 함께 뜨는 영상", videoIds: [videos[1].id, videos[2].id, videos[3].id, videos[4].id, videos[6].id] },
 ];
 
+export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
+  const top = liveVideos.slice(0, 10);
+  const fastest = [...liveVideos]
+    .sort((a, b) => b.velocity - a.velocity)
+    .slice(0, 10);
+  const publishedRecently = liveVideos
+    .filter((video) => {
+      if (!video.publishedAt) return false;
+      const age = Date.now() - new Date(video.publishedAt).getTime();
+      return age >= 0 && age <= 48 * 60 * 60 * 1000;
+    })
+    .slice(0, 10);
+  const music = liveVideos.filter((video) => video.category === "음악").slice(0, 10);
+  const entertainment = liveVideos
+    .filter((video) => ["엔터테인먼트", "코미디", "영화·애니메이션"].includes(video.category))
+    .slice(0, 10);
+  const gaming = liveVideos.filter((video) => video.category === "게임").slice(0, 10);
+
+  const liveRows: TrendRow[] = [
+    {
+      id: "top",
+      group: "랭킹",
+      label: "현재 인기",
+      title: "대한민국 인기 영상 TOP 10",
+      hint: "YouTube Data API 현재 스냅샷",
+      topStyle: true,
+      videoIds: top.map((video) => video.id),
+    },
+    {
+      id: "velocity",
+      group: "랭킹",
+      label: "평균 조회 속도",
+      title: "게시 이후 평균 조회 속도",
+      hint: "누적 조회수 ÷ 공개 후 경과 시간",
+      videoIds: fastest.map((video) => video.id),
+    },
+  ];
+
+  if (publishedRecently.length) {
+    liveRows.push({
+      id: "new",
+      group: "랭킹",
+      label: "최근 공개",
+      title: "48시간 안에 공개된 인기 영상",
+      hint: "현재 인기 목록 기준",
+      videoIds: publishedRecently.map((video) => video.id),
+    });
+  }
+  if (music.length) {
+    liveRows.push({
+      id: "music",
+      group: "YouTube Music",
+      label: "인기 음악",
+      title: "대한민국 인기 영상 속 음악",
+      hint: "공식 Music Charts가 아닌 인기 영상 필터",
+      videoIds: music.map((video) => video.id),
+    });
+  }
+  if (entertainment.length) {
+    liveRows.push({
+      id: "entertainment",
+      group: "분야",
+      label: "엔터테인먼트",
+      title: "엔터테인먼트는 지금",
+      videoIds: entertainment.map((video) => video.id),
+    });
+  }
+  if (gaming.length) {
+    liveRows.push({
+      id: "gaming",
+      group: "분야",
+      label: "게임",
+      title: "지금 인기 있는 게임 영상",
+      videoIds: gaming.map((video) => video.id),
+    });
+  }
+
+  return liveRows;
+}
+
 export const shareData = [
   { time: "6일 전", music: 46, entertainment: 23, game: 12, tech: 8, entered: 7, exited: 4 },
   { time: "5일 전", music: 43, entertainment: 25, game: 13, tech: 9, entered: 5, exited: 6 },
@@ -234,4 +316,3 @@ export const themes = [
   { id: "ice", name: "Polar Ice", colors: ["#071218", "#8ff5ff", "#b0b9ff"] },
   { id: "lime", name: "Electric Lime", colors: ["#0d1008", "#b8ff52", "#48e6c8"] },
 ];
-
