@@ -120,7 +120,7 @@ async function handleYouTubeTrending(
   if (!env.YT_API_KEY) {
     return jsonResponse(
       {
-        error: "YT_API_KEY is not configured as a Worker runtime secret.",
+        error: "YT_API_KEY가 Cloudflare Worker Runtime Secret에 설정되지 않았습니다.",
         code: "missing_api_key",
       },
       503,

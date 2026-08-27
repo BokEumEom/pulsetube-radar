@@ -41,8 +41,16 @@ const formatCapturedAt = (value: string) =>
 
 async function requestTrendingVideos(signal?: AbortSignal): Promise<TrendingApiResponse> {
   const response = await fetch("/api/youtube/trending", { signal, cache: "no-store" });
-  const body = (await response.json()) as TrendingApiResponse & { error?: string };
-  if (!response.ok) throw new Error(body.error ?? "실시간 인기 영상을 불러오지 못했습니다.");
+  let body: TrendingApiResponse & { error?: string; code?: string };
+  try {
+    body = (await response.json()) as TrendingApiResponse & { error?: string; code?: string };
+  } catch {
+    throw new Error(`실시간 API 응답을 읽지 못했습니다. HTTP ${response.status}`);
+  }
+  if (!response.ok) {
+    const detail = body.code ? ` [${body.code}]` : "";
+    throw new Error(`${body.error ?? "실시간 인기 영상을 불러오지 못했습니다."}${detail}`);
+  }
   if (!Array.isArray(body.videos) || body.videos.length === 0) {
     throw new Error("실시간 인기 영상 응답이 비어 있습니다.");
   }
@@ -119,7 +127,7 @@ function Hero({ video, isSelection, onClear, onQuiz }: {
         </button>
       </div>
     </div>
-    <div className="live-pill"><span /> {video.source === "youtube" ? "YOUTUBE LIVE" : "DEMO SNAPSHOT"}</div>
+    <div className="live-pill"><span /> {video.source === "youtube" ? "YOUTUBE LIVE" : "SAMPLE DATA"}</div>
   </section>;
 }
 
@@ -302,6 +310,7 @@ export default function Home() {
         <div className="capture"><span/> 수집 {updatedAt} KST</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
+        {!dataLoading&&!isLive&&<div className="data-alert" role="status"><AlertTriangle/><strong>현재 샘플 데이터 표시 중</strong><span>{dataError??"YouTube 실데이터 연결에 실패했습니다."}</span><button onClick={refresh} disabled={refreshing}>{refreshing?"확인 중":"다시 확인"}</button></div>}
         <Hero video={selected??videos[0]} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} onQuiz={()=>setQuizOpen(true)}/>{selected&&<HistoryPanel video={selected}/>} 
         <section className="insight-band" aria-label="오늘의 인사이트"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>{isLive?"현재":"+3%p"}</em></div><div><TrendingUp/><span>{isLive?"평균 조회 속도":"가장 빠른 영상"}</span><b>{isLive?"":"+"}{fmt(fastest.velocity)}/시</b></div><div><Sparkles/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 데이터</span><b>{videos.length}개 영상 · {baseRows.length}개 신호</b></div></section>
         <div className="home-layout"><aside className="sidebar"><button className={focus===null?"active":""} onClick={()=>setFocus(null)}><span>⌂</span> 홈</button>
