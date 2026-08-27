@@ -46,6 +46,12 @@ export default defineConfig(async () => {
   const localBindingConfig = {
     main: "./worker/index.ts",
     compatibility_flags: ["nodejs_compat"],
+    // The Cloudflare dashboard owns production values. Preserve them when the
+    // generated Wrangler config is deployed from the connected repository.
+    keep_vars: true,
+    secrets: {
+      required: ["YT_API_KEY"],
+    },
     d1_databases: d1
       ? [
           {

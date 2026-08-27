@@ -52,6 +52,8 @@ src/
 필수 설정:
 
 - `YT_API_KEY`: Worker Secret
+- `YT_API_KEY`는 Build Variable이 아닌 Runtime Secret으로 설정
+- 생성되는 Wrangler 설정은 `keep_vars: true`로 대시보드 런타임 값을 보존하고, `secrets.required`로 키 누락 배포를 차단
 - `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`: 선택, AI 브리핑용
 - D1 binding: `DB` (시계열 수집 단계)
 - Cron: `0 * * * *` (시계열 수집 단계)
