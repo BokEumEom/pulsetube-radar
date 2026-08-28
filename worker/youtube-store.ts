@@ -1,0 +1,449 @@
+export type TrendSnapshotVideo = {
+  id: string;
+  title: string;
+  channel: string;
+  categoryId: string | null;
+  category: string;
+  views: number;
+  likes: number;
+  velocity: number;
+  velocityKind: "snapshot" | "lifetime";
+  delta: number | null;
+  rank: number;
+  isNew?: boolean;
+  thumbnail: string;
+  description: string;
+  tags: string[];
+  aiNote: string;
+  history: { time: string; rank: number; views: number }[];
+  publishedAt?: string;
+  source: "youtube";
+};
+
+type SnapshotRow = {
+  id: string;
+  captured_at: number;
+};
+
+type RankingRow = {
+  video_id: string;
+  rank: number;
+  previous_rank: number | null;
+  delta: number | null;
+  is_new: number;
+  views: number;
+  likes: number;
+  views_per_hour: number;
+  title: string;
+  channel: string;
+  category_id: string | null;
+  category_name: string;
+  thumbnail: string;
+  description: string;
+  tags_json: string;
+  published_at: number | null;
+};
+
+type PreviousRankingRow = {
+  video_id: string;
+  rank: number;
+  views: number;
+};
+
+const REGION = "KR";
+const SNAPSHOT_INTERVAL_SECONDS = 15 * 60;
+
+const parseTags = (value: string) => {
+  try {
+    const tags = JSON.parse(value);
+    return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+const formatTime = (seconds: number) =>
+  new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(seconds * 1000));
+
+const toVideo = (row: RankingRow): TrendSnapshotVideo => ({
+  id: row.video_id,
+  title: row.title,
+  channel: row.channel,
+  categoryId: row.category_id,
+  category: row.category_name,
+  views: row.views,
+  likes: row.likes,
+  velocity: row.views_per_hour,
+  velocityKind: row.previous_rank === null ? "lifetime" : "snapshot",
+  delta: row.delta,
+  rank: row.rank,
+  isNew: Boolean(row.is_new),
+  thumbnail: row.thumbnail,
+  description: row.description,
+  tags: parseTags(row.tags_json),
+  aiNote:
+    row.delta === null
+      ? `대한민국 인기 영상 ${row.rank}위로 수집된 첫 비교 기준점입니다.`
+      : row.delta > 0
+        ? `직전 수집보다 ${row.delta}계단 상승한 대한민국 인기 영상입니다.`
+        : row.delta < 0
+          ? `직전 수집보다 ${Math.abs(row.delta)}계단 하락한 대한민국 인기 영상입니다.`
+          : `직전 수집과 같은 ${row.rank}위를 유지하고 있습니다.`,
+  history: [{ time: "현재", rank: row.rank, views: row.views }],
+  publishedAt: row.published_at ? new Date(row.published_at * 1000).toISOString() : undefined,
+  source: "youtube",
+});
+
+export const scopeForCategory = (categoryId: string | null) =>
+  categoryId ? `category:${categoryId}` : "all";
+
+export async function readLatestSnapshot(
+  db: D1Database,
+  scope: string,
+  maxAgeSeconds = 20 * 60,
+) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - maxAgeSeconds;
+  const snapshot = await db
+    .prepare(
+      `SELECT id, captured_at
+       FROM youtube_snapshots
+       WHERE region = ? AND scope = ? AND captured_at >= ?
+       ORDER BY captured_at DESC
+       LIMIT 1`,
+    )
+    .bind(REGION, scope, minimumCapturedAt)
+    .first<SnapshotRow>();
+
+  if (!snapshot) return null;
+
+  const result = await db
+    .prepare(
+      `SELECT video_id, rank, previous_rank, delta, is_new, views, likes,
+              views_per_hour, title, channel, category_id, category_name,
+              thumbnail, description, tags_json, published_at
+       FROM youtube_rankings
+       WHERE snapshot_id = ?
+       ORDER BY rank ASC`,
+    )
+    .bind(snapshot.id)
+    .all<RankingRow>();
+
+  if (!result.results.length) return null;
+
+  return {
+    capturedAt: new Date(snapshot.captured_at * 1000).toISOString(),
+    videos: result.results.map(toVideo),
+  };
+}
+
+export async function saveSnapshot(
+  db: D1Database,
+  input: {
+    scope: string;
+    categoryId: string | null;
+    capturedAt: number;
+    videos: TrendSnapshotVideo[];
+  },
+) {
+  const capturedBucket = Math.floor(input.capturedAt / SNAPSHOT_INTERVAL_SECONDS);
+  const snapshotId = `${REGION}:${input.scope}:${capturedBucket}`;
+  const previousSnapshot = await db
+    .prepare(
+      `SELECT id, captured_at
+       FROM youtube_snapshots
+       WHERE region = ? AND scope = ? AND captured_bucket < ?
+       ORDER BY captured_bucket DESC
+       LIMIT 1`,
+    )
+    .bind(REGION, input.scope, capturedBucket)
+    .first<SnapshotRow>();
+
+  const previousRankings = previousSnapshot
+    ? await db
+        .prepare(
+          `SELECT video_id, rank, views
+           FROM youtube_rankings
+           WHERE snapshot_id = ?`,
+        )
+        .bind(previousSnapshot.id)
+        .all<PreviousRankingRow>()
+    : { results: [] as PreviousRankingRow[] };
+  const previousByVideo = new Map(
+    previousRankings.results.map((row) => [row.video_id, row]),
+  );
+  const elapsedHours = previousSnapshot
+    ? Math.max((input.capturedAt - previousSnapshot.captured_at) / 3600, 0.01)
+    : null;
+
+  const snapshotStatement = db
+    .prepare(
+      `INSERT INTO youtube_snapshots
+         (id, region, scope, category_id, captured_at, captured_bucket, item_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         captured_at = excluded.captured_at,
+         item_count = excluded.item_count`,
+    )
+    .bind(
+      snapshotId,
+      REGION,
+      input.scope,
+      input.categoryId,
+      input.capturedAt,
+      capturedBucket,
+      input.videos.length,
+    );
+
+  const rankingStatements = input.videos.map((video) => {
+    const previous = previousByVideo.get(video.id);
+    const delta = previous ? previous.rank - video.rank : null;
+    const isNew = Boolean(previousSnapshot && !previous);
+    const viewsPerHour = previous && elapsedHours
+      ? Math.max(0, Math.round((video.views - previous.views) / elapsedHours))
+      : video.velocity;
+    const publishedAt = video.publishedAt
+      ? Math.floor(new Date(video.publishedAt).getTime() / 1000)
+      : null;
+
+    return db
+      .prepare(
+        `INSERT INTO youtube_rankings
+           (snapshot_id, video_id, rank, previous_rank, delta, is_new, views,
+            likes, views_per_hour, title, channel, category_id, category_name,
+            thumbnail, description, tags_json, published_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(snapshot_id, video_id) DO UPDATE SET
+           rank = excluded.rank,
+           previous_rank = excluded.previous_rank,
+           delta = excluded.delta,
+           is_new = excluded.is_new,
+           views = excluded.views,
+           likes = excluded.likes,
+           views_per_hour = excluded.views_per_hour,
+           title = excluded.title,
+           channel = excluded.channel,
+           category_id = excluded.category_id,
+           category_name = excluded.category_name,
+           thumbnail = excluded.thumbnail,
+           description = excluded.description,
+           tags_json = excluded.tags_json,
+           published_at = excluded.published_at`,
+      )
+      .bind(
+        snapshotId,
+        video.id,
+        video.rank,
+        previous?.rank ?? null,
+        delta,
+        isNew ? 1 : 0,
+        video.views,
+        video.likes,
+        viewsPerHour,
+        video.title,
+        video.channel,
+        video.categoryId,
+        video.category,
+        video.thumbnail,
+        video.description,
+        JSON.stringify(video.tags),
+        Number.isFinite(publishedAt) ? publishedAt : null,
+      );
+  });
+
+  await db.batch([snapshotStatement, ...rankingStatements]);
+
+  const saved = await readLatestSnapshot(db, input.scope);
+  return saved?.videos ?? input.videos;
+}
+
+export async function readVideoHistory(
+  db: D1Database,
+  videoId: string,
+  hours: number,
+) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
+  const result = await db
+    .prepare(
+      `WITH ranked_points AS (
+         SELECT s.captured_at, r.rank, r.views, r.likes, r.views_per_hour,
+                ROW_NUMBER() OVER (
+                  PARTITION BY s.captured_at
+                  ORDER BY CASE WHEN s.scope = 'all' THEN 0 ELSE 1 END
+                ) AS scope_priority
+         FROM youtube_snapshots s
+         JOIN youtube_rankings r ON r.snapshot_id = s.id
+         WHERE s.region = ? AND r.video_id = ? AND s.captured_at >= ?
+       )
+       SELECT captured_at, rank, views, likes, views_per_hour
+       FROM ranked_points
+       WHERE scope_priority = 1
+       ORDER BY captured_at ASC`,
+    )
+    .bind(REGION, videoId, minimumCapturedAt)
+    .all<{
+      captured_at: number;
+      rank: number;
+      views: number;
+      likes: number;
+      views_per_hour: number;
+    }>();
+
+  return result.results.map((row) => ({
+    capturedAt: new Date(row.captured_at * 1000).toISOString(),
+    time: formatTime(row.captured_at),
+    rank: row.rank,
+    views: row.views,
+    likes: row.likes,
+    velocity: row.views_per_hour,
+  }));
+}
+
+const categoryGroup = (categoryName: string) => {
+  if (categoryName === "음악") return "music";
+  if (["엔터테인먼트", "코미디", "영화·애니메이션"].includes(categoryName)) {
+    return "entertainment";
+  }
+  if (categoryName === "게임") return "game";
+  if (["과학기술", "교육"].includes(categoryName)) return "tech";
+  return "other";
+};
+
+export async function readCategoryTrends(db: D1Database, hours: number) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
+  const result = await db
+    .prepare(
+      `SELECT CAST(s.captured_at / 3600 AS INTEGER) * 3600 AS captured_hour,
+              r.category_name,
+              COUNT(*) AS item_count
+       FROM youtube_snapshots s
+       JOIN youtube_rankings r ON r.snapshot_id = s.id
+       WHERE s.region = ? AND s.scope = 'all' AND s.captured_at >= ?
+       GROUP BY captured_hour, r.category_name
+       ORDER BY captured_hour ASC`,
+    )
+    .bind(REGION, minimumCapturedAt)
+    .all<{ captured_hour: number; category_name: string; item_count: number }>();
+
+  const byHour = new Map<number, Record<string, number>>();
+  for (const row of result.results) {
+    const point = byHour.get(row.captured_hour) ?? {
+      music: 0,
+      entertainment: 0,
+      game: 0,
+      tech: 0,
+      other: 0,
+    };
+    const group = categoryGroup(row.category_name);
+    point[group] = (point[group] ?? 0) + row.item_count;
+    byHour.set(row.captured_hour, point);
+  }
+
+  return [...byHour.entries()].map(([capturedAt, counts]) => {
+    const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+    const share = (key: string) => Math.round(((counts[key] ?? 0) / Math.max(1, total)) * 100);
+    return {
+      capturedAt: new Date(capturedAt * 1000).toISOString(),
+      time: formatTime(capturedAt),
+      music: share("music"),
+      entertainment: share("entertainment"),
+      game: share("game"),
+      tech: share("tech"),
+      other: share("other"),
+      sampleSize: total,
+    };
+  });
+}
+
+export async function readChurn(db: D1Database, hours: number) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
+  const result = await db
+    .prepare(
+      `WITH hour_candidates AS (
+         SELECT id, captured_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY CAST(captured_at / 3600 AS INTEGER)
+                  ORDER BY captured_at DESC
+                ) AS hour_priority
+         FROM youtube_snapshots
+         WHERE region = ? AND scope = 'all' AND captured_at >= ?
+       ), hourly AS (
+         SELECT id, captured_at
+         FROM hour_candidates
+         WHERE hour_priority = 1
+       ), ordered AS (
+         SELECT id, captured_at,
+                LAG(id) OVER (ORDER BY captured_at ASC) AS previous_id
+         FROM hourly
+       )
+       SELECT current.captured_at,
+              (SELECT COUNT(*)
+               FROM youtube_rankings current_rank
+               LEFT JOIN youtube_rankings previous_rank
+                 ON previous_rank.snapshot_id = current.previous_id
+                AND previous_rank.video_id = current_rank.video_id
+               WHERE current_rank.snapshot_id = current.id
+                 AND previous_rank.video_id IS NULL) AS entered,
+              (SELECT COUNT(*)
+               FROM youtube_rankings previous_rank
+               LEFT JOIN youtube_rankings current_rank
+                 ON current_rank.snapshot_id = current.id
+                AND current_rank.video_id = previous_rank.video_id
+               WHERE previous_rank.snapshot_id = current.previous_id
+                 AND current_rank.video_id IS NULL) AS exited
+       FROM ordered current
+       WHERE current.previous_id IS NOT NULL
+       ORDER BY current.captured_at ASC`,
+    )
+    .bind(REGION, minimumCapturedAt)
+    .all<{ captured_at: number; entered: number; exited: number }>();
+
+  return result.results.map((row) => ({
+    capturedAt: new Date(row.captured_at * 1000).toISOString(),
+    time: formatTime(row.captured_at),
+    entered: row.entered,
+    exited: row.exited,
+  }));
+}
+
+export async function readStorageStatus(db: D1Database) {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS snapshot_count,
+              MIN(captured_at) AS first_captured_at,
+              MAX(captured_at) AS latest_captured_at
+       FROM youtube_snapshots
+       WHERE region = ?`,
+    )
+    .bind(REGION)
+    .first<{
+      snapshot_count: number;
+      first_captured_at: number | null;
+      latest_captured_at: number | null;
+    }>();
+
+  return {
+    enabled: true,
+    snapshotCount: row?.snapshot_count ?? 0,
+    firstCapturedAt: row?.first_captured_at
+      ? new Date(row.first_captured_at * 1000).toISOString()
+      : null,
+    latestCapturedAt: row?.latest_captured_at
+      ? new Date(row.latest_captured_at * 1000).toISOString()
+      : null,
+  };
+}
+
+export async function pruneSnapshots(db: D1Database, retentionDays = 30) {
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 24 * 3600;
+  await db
+    .prepare("DELETE FROM youtube_snapshots WHERE captured_at < ?")
+    .bind(cutoff)
+    .run();
+}

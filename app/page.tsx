@@ -30,8 +30,43 @@ type TrendingApiResponse = {
   source: "youtube";
   region: "KR";
   capturedAt: string;
+  historyEnabled?: boolean;
   category: { id: string; label: string } | null;
   videos: TrendVideo[];
+};
+
+type HistoryPoint = {
+  capturedAt?: string;
+  time: string;
+  rank: number;
+  views: number;
+  likes?: number;
+  velocity?: number;
+};
+
+type CategoryTrendPoint = {
+  capturedAt: string;
+  time: string;
+  music: number;
+  entertainment: number;
+  game: number;
+  tech: number;
+  other: number;
+  sampleSize: number;
+};
+
+type ChurnPoint = {
+  capturedAt: string;
+  time: string;
+  entered: number;
+  exited: number;
+};
+
+type StorageStatus = {
+  enabled: boolean;
+  snapshotCount: number;
+  firstCapturedAt: string | null;
+  latestCapturedAt: string | null;
 };
 
 const formatCapturedAt = (value: string) =>
@@ -61,9 +96,26 @@ async function requestTrendingVideos(categoryId?: string, signal?: AbortSignal):
   return body;
 }
 
+async function requestAnalytics<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, { signal, cache: "no-store" });
+  const body = await response.json() as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(body.error ?? "수집 히스토리를 불러오지 못했습니다.");
+  }
+  return body;
+}
+
 const fmt = (value: number) => new Intl.NumberFormat("ko-KR", {
   notation: "compact", maximumFractionDigits: 1,
 }).format(value);
+
+const velocityText = (video: TrendVideo, long = false) => {
+  if (video.source !== "youtube") return `+${fmt(video.velocity)}/시`;
+  if (video.velocityKind === "snapshot") {
+    return `${long ? "최근 수집 " : "최근 +"}${fmt(video.velocity)}/시`;
+  }
+  return `${long ? "게시 후 평균 " : "평균 "}${fmt(video.velocity)}/시`;
+};
 
 function Delta({ video }: { video: TrendVideo }) {
   if (video.isNew) return <span className="delta new">NEW</span>;
@@ -86,7 +138,7 @@ function VideoTile({ video, index, topStyle, onSelect }: {
     </span>
     <span className="video-copy">
       <strong>{video.title}</strong><span>{video.channel}</span>
-      <span>조회 {fmt(video.views)} <em>{video.source === "youtube" ? "평균 " : "+"}{fmt(video.velocity)}/시</em></span>
+      <span>조회 {fmt(video.views)} <em>{velocityText(video)}</em></span>
     </span>
     <span className="hover-preview" aria-hidden="true">
       <b>{video.title}</b><small>{video.category} · {video.tags.join(" · ")}</small>
@@ -152,7 +204,7 @@ function Hero({ video, isSelection, onClear, scopeLabel }: {
       </div>
       <h1>{video.title}</h1><p>{video.description}</p>
       <div className="ai-line"><span>SIGNAL</span>{video.aiNote}</div>
-      <div className="hero-meta">{video.channel} · 조회 {fmt(video.views)} · 좋아요 {fmt(video.likes)} · <b>{video.source === "youtube" ? "게시 후 평균 " : "+"}{fmt(video.velocity)}/시</b></div>
+      <div className="hero-meta">{video.channel} · 조회 {fmt(video.views)} · 좋아요 {fmt(video.likes)} · <b>{velocityText(video, true)}</b></div>
       <div className="hero-actions">
         <a href={`https://www.youtube.com/watch?v=${video.id}`} target="_blank" rel="noreferrer" className="primary-action"><Play fill="currentColor" /> 보러가기</a>
         {isSelection && <button className="secondary-action" onClick={onClear}><ArrowLeft /> 목록으로</button>}
@@ -162,23 +214,81 @@ function Hero({ video, isSelection, onClear, scopeLabel }: {
   </section>;
 }
 
-function HistoryPanel({ video }: { video: TrendVideo }) {
-  const hasHistory = video.history.length > 1;
+function HistoryPanel({ video, hours = 168, periodLabel = "7일" }: {
+  video: TrendVideo;
+  hours?: number;
+  periodLabel?: string;
+}) {
+  type HistoryState = "demo" | "loading" | "ready" | "collecting" | "unavailable";
+  const [historyResult, setHistoryResult] = useState<{
+    videoId: string;
+    hours: number;
+    points: HistoryPoint[];
+    state: HistoryState;
+  } | null>(null);
+
+  useEffect(() => {
+    if (video.source !== "youtube") return;
+
+    const controller = new AbortController();
+    void requestAnalytics<{ points: HistoryPoint[] }>(
+      `/api/youtube/history?${new URLSearchParams({ videoId: video.id, hours: String(hours) })}`,
+      controller.signal,
+    ).then((body) => {
+      setHistoryResult({
+        videoId: video.id,
+        hours,
+        points: body.points,
+        state: body.points.length > 1 ? "ready" : "collecting",
+      });
+    }).catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setHistoryResult({ videoId: video.id, hours, points: [], state: "unavailable" });
+    });
+
+    return () => controller.abort();
+  }, [hours, video.id, video.source]);
+
+  const currentResult = historyResult?.videoId === video.id && historyResult.hours === hours
+    ? historyResult
+    : null;
+  const historyState: HistoryState = video.source !== "youtube"
+    ? "demo"
+    : currentResult?.state ?? "loading";
+  const series = currentResult?.points.length ? currentResult.points : video.history;
+  const hasHistory = series.length > 1;
+  const rankChange = hasHistory ? series[0].rank - series[series.length - 1].rank : 0;
+  const changeText = rankChange > 0
+    ? `▲ ${rankChange}`
+    : rankChange < 0
+      ? `▼ ${Math.abs(rankChange)}`
+      : "–";
+  const stateText = historyState === "loading"
+    ? "D1 수집 이력을 확인하는 중입니다."
+    : historyState === "ready"
+      ? `실제 ${periodLabel} 수집 스냅샷 ${series.length}개를 표시합니다.`
+      : historyState === "collecting"
+        ? "첫 스냅샷이 저장되었습니다. 다음 수집부터 변화량이 표시됩니다."
+        : historyState === "unavailable"
+          ? "D1이 아직 연결되지 않아 현재 스냅샷만 표시합니다."
+          : "샘플 시계열을 표시합니다.";
+
   return <section className="selected-panel">
     <div className="section-head"><div><span>SELECTED SIGNAL</span><h2>선택한 콘텐츠 추이</h2></div>
-      <div className="metric"><small>{hasHistory ? "7일 순위 변화" : "현재 순위"}</small><strong>{hasHistory ? `▲ ${Math.max(1, video.history[0].rank - video.rank)}` : `#${video.rank}`}</strong></div>
+      <div className="metric"><small>{hasHistory ? `${periodLabel} 순위 변화` : "현재 순위"}</small><strong>{hasHistory ? changeText : `#${video.rank}`}</strong></div>
     </div>
+    <div className={`history-status ${historyState}`}><Database/>{stateText}</div>
     <div className="chart-grid">
       <div className="chart-box"><h3>급상승 순위 <span>{hasHistory ? "낮을수록 높음" : "스냅샷 축적 전"}</span></h3>
-        <ResponsiveContainer width="100%" height={220}><LineChart data={video.history} margin={{ top:16,right:12,left:-22,bottom:0 }}>
+        <ResponsiveContainer width="100%" height={220}><LineChart data={series} margin={{ top:16,right:12,left:-22,bottom:0 }}>
           <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" stroke="var(--muted-fg)" tickLine={false} axisLine={false} fontSize={11}/>
           <YAxis reversed domain={[1,30]} stroke="var(--muted-fg)" tickLine={false} axisLine={false} fontSize={11}/>
           <Tooltip contentStyle={{ background:"var(--panel-solid)",border:"1px solid var(--border)",borderRadius:12 }}/>
           <Line type="monotone" dataKey="rank" stroke="var(--accent)" strokeWidth={3} dot={{ fill:"var(--accent)",r:3 }}/>
         </LineChart></ResponsiveContainer>
       </div>
-      <div className="chart-box"><h3>누적 조회수 <span>{hasHistory ? "최근 7일" : "현재 값"}</span></h3>
-        <ResponsiveContainer width="100%" height={220}><AreaChart data={video.history} margin={{ top:16,right:12,left:-6,bottom:0 }}>
+      <div className="chart-box"><h3>누적 조회수 <span>{hasHistory ? `최근 ${periodLabel}` : "현재 값"}</span></h3>
+        <ResponsiveContainer width="100%" height={220}><AreaChart data={series} margin={{ top:16,right:12,left:-6,bottom:0 }}>
           <defs><linearGradient id="viewFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="var(--accent2)" stopOpacity={.55}/><stop offset="1" stopColor="var(--accent2)" stopOpacity={0}/></linearGradient></defs>
           <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" stroke="var(--muted-fg)" tickLine={false} axisLine={false} fontSize={11}/>
           <YAxis tickFormatter={fmt} stroke="var(--muted-fg)" tickLine={false} axisLine={false} fontSize={11} width={52}/>
@@ -194,6 +304,7 @@ function SeriesView({ videos }: { videos: TrendVideo[] }) {
   const [videoId, setVideoId] = useState(videos[0].id);
   const [period, setPeriod] = useState("7일");
   const video = videos.find((item) => item.id === videoId) ?? videos[0];
+  const periodHours: Record<string, number> = { "24시간": 24, "7일": 168, "30일": 720 };
   return <main className="subpage">
     <div className="page-heading"><div><span>TIME SERIES</span><h1>영상 시계열 추이</h1><p>순위와 조회수의 변화 속도를 함께 비교합니다.</p></div><Clock3 /></div>
     <section className="control-card">
@@ -202,11 +313,11 @@ function SeriesView({ videos }: { videos: TrendVideo[] }) {
       </select></label>
       <div className="periods">{["24시간","7일","30일"].map((item) => <button key={item} className={period === item ? "active" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div>
     </section>
-    <HistoryPanel video={video}/>
+    <HistoryPanel video={video} hours={periodHours[period]} periodLabel={period}/>
     <section className="signal-table"><div className="section-head"><div><span>VELOCITY</span><h2>상승 속도 비교</h2></div></div>
       <div className="table-head"><span>영상</span><span>현재 순위</span><span>시간당 조회</span><span>변화</span></div>
       {videos.slice(0,6).map((item) => <button key={item.id} onClick={() => setVideoId(item.id)}>
-        <span><img src={item.thumbnail} alt=""/><b>{item.title}</b></span><strong>#{item.rank}</strong><em>+{fmt(item.velocity)}</em><Delta video={item}/>
+        <span><img src={item.thumbnail} alt=""/><b>{item.title}</b></span><strong>#{item.rank}</strong><em>{velocityText(item)}</em><Delta video={item}/>
       </button>)}
     </section>
   </main>;
@@ -214,6 +325,33 @@ function SeriesView({ videos }: { videos: TrendVideo[] }) {
 
 function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }) {
   const [briefType, setBriefType] = useState("today");
+  const [categoryHistory, setCategoryHistory] = useState<CategoryTrendPoint[]>([]);
+  const [churnHistory, setChurnHistory] = useState<ChurnPoint[]>([]);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
+  const [analyticsState, setAnalyticsState] = useState<"idle" | "loading" | "ready" | "collecting" | "unavailable">(
+    isLive ? "loading" : "idle",
+  );
+
+  useEffect(() => {
+    if (!isLive) return;
+    const controller = new AbortController();
+    const hours = 168;
+    void Promise.all([
+      requestAnalytics<{ points: CategoryTrendPoint[] }>(`/api/youtube/category-trends?hours=${hours}`, controller.signal),
+      requestAnalytics<{ points: ChurnPoint[] }>(`/api/youtube/churn?hours=${hours}`, controller.signal),
+      requestAnalytics<StorageStatus>("/api/youtube/storage-status", controller.signal),
+    ]).then(([categoryBody, churnBody, status]) => {
+      setCategoryHistory(categoryBody.points);
+      setChurnHistory(churnBody.points);
+      setStorageStatus(status);
+      setAnalyticsState(categoryBody.points.length > 1 ? "ready" : "collecting");
+    }).catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setAnalyticsState("unavailable");
+    });
+    return () => controller.abort();
+  }, [isLive]);
+
   const categoryShare = [
     { category:"음악", value:videos.filter((video)=>video.category==="음악").length },
     { category:"엔터", value:videos.filter((video)=>["엔터테인먼트","코미디","영화·애니메이션"].includes(video.category)).length },
@@ -222,10 +360,30 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
     { category:"기타", value:videos.filter((video)=>!["음악","엔터테인먼트","코미디","영화·애니메이션","게임","과학기술","교육"].includes(video.category)).length },
   ].map((item)=>({...item,share:Math.round((item.value/Math.max(1,videos.length))*100)}));
   const topCategory = [...categoryShare].sort((a,b)=>b.value-a.value)[0];
+  type CategoryMetricKey = "music" | "entertainment" | "game" | "tech" | "other";
+  const categoryMetricKey: Record<string, CategoryMetricKey> = {
+    "음악": "music",
+    "엔터": "entertainment",
+    "게임": "game",
+    "기술·교육": "tech",
+    "기타": "other",
+  };
+  const firstCategoryPoint = categoryHistory[0];
+  const latestCategoryPoint = categoryHistory[categoryHistory.length - 1];
+  const topMetricKey = categoryMetricKey[topCategory.category] ?? "other";
+  const categoryDelta = firstCategoryPoint && latestCategoryPoint
+    ? latestCategoryPoint[topMetricKey] - firstCategoryPoint[topMetricKey]
+    : null;
+  const enteredTotal = churnHistory.reduce((sum, point) => sum + point.entered, 0);
+  const exitedTotal = churnHistory.reduce((sum, point) => sum + point.exited, 0);
   const briefs: Record<string,string> = isLive ? {
     today:`현재 대한민국 인기 영상 ${videos.length}개 중 ${topCategory.category} 분야가 ${topCategory.share}%로 가장 큰 비중을 차지합니다. 이 수치는 YouTube Data API의 현재 스냅샷을 기준으로 합니다.`,
-    compare:"아직 이전 스냅샷이 저장되지 않아 전일 대비 증감은 계산하지 않습니다. D1 예약 수집이 연결되면 순위 진입·이탈과 카테고리 변화량을 제공할 수 있습니다.",
-    report:"현재 단계에서는 실시간 인기 순위와 누적 조회수, 게시 이후 평균 조회 속도를 제공합니다. 7일 리포트는 시간별 스냅샷이 축적된 이후 활성화됩니다.",
+    compare:categoryDelta === null
+      ? "비교 가능한 이전 스냅샷이 아직 없습니다. D1 연결 후 두 번째 수집부터 카테고리 변화량이 계산됩니다."
+      : `${topCategory.category} 비중은 수집 구간 시작보다 ${Math.abs(categoryDelta)}%p ${categoryDelta > 0 ? "늘었고" : categoryDelta < 0 ? "줄었고" : "변화가 없고"}, 같은 기간 신규 진입 ${enteredTotal}건·이탈 ${exitedTotal}건이 감지됐습니다.`,
+    report:categoryHistory.length > 1
+      ? `최근 7일 범위에서 ${categoryHistory.length}개 시간 구간을 비교했습니다. 현재 가장 큰 분야는 ${topCategory.category}이며, 총 ${storageStatus?.snapshotCount ?? categoryHistory.length}개 D1 스냅샷을 근거로 한 규칙 기반 리포트입니다.`
+      : "D1에 스냅샷이 축적되면 7일 카테고리 점유율과 진입·이탈 리포트가 자동으로 활성화됩니다.",
   } : {
     today:"음악 카테고리의 점유율이 57%까지 확대됐습니다. 상위권에서는 오래된 글로벌 히트곡의 재진입이 두드러지고, 짧은 댄스·커버 콘텐츠가 원본 영상으로 조회를 되돌리는 흐름이 강합니다.",
     compare:"어제보다 음악 비중이 3%p 늘었고 엔터테인먼트는 1%p 줄었습니다. 신규 진입은 3건 감소했지만 상위 10개 영상의 평균 시간당 조회는 8.4% 증가했습니다.",
@@ -236,7 +394,11 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
     <div className="share-grid">
       <section className="chart-box large"><div className="section-head compact"><div><span>SHARE</span><h2>카테고리 점유율</h2></div>
         <div className="legend"><i className="music"/>음악 <i className="ent"/>엔터 <i className="game"/>게임 <i className="tech"/>기술</div></div>
-        {isLive?<ResponsiveContainer width="100%" height={330}><BarChart data={categoryShare} layout="vertical" margin={{ top:20,right:24,left:8,bottom:0 }}>
+        {isLive&&categoryHistory.length>1?<ResponsiveContainer width="100%" height={330}><AreaChart data={categoryHistory} margin={{ top:20,right:12,left:-18,bottom:0 }}>
+          <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><YAxis domain={[0,100]} tickFormatter={(v)=>`${v}%`} tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/>
+          <Tooltip formatter={(value)=>`${value}%`} contentStyle={{ background:"var(--panel-solid)",border:"1px solid var(--border)",borderRadius:12 }}/>
+          <Area type="monotone" stackId="1" dataKey="music" name="음악" stroke="#baff46" fill="#baff46" fillOpacity={.72}/><Area type="monotone" stackId="1" dataKey="entertainment" name="엔터" stroke="#7259ff" fill="#7259ff" fillOpacity={.76}/><Area type="monotone" stackId="1" dataKey="game" name="게임" stroke="#ff5c8a" fill="#ff5c8a" fillOpacity={.72}/><Area type="monotone" stackId="1" dataKey="tech" name="기술" stroke="#43d9ca" fill="#43d9ca" fillOpacity={.68}/><Area type="monotone" stackId="1" dataKey="other" name="기타" stroke="#7f8795" fill="#7f8795" fillOpacity={.55}/>
+        </AreaChart></ResponsiveContainer>:isLive?<ResponsiveContainer width="100%" height={330}><BarChart data={categoryShare} layout="vertical" margin={{ top:20,right:24,left:8,bottom:0 }}>
           <CartesianGrid stroke="var(--grid)" horizontal={false}/><XAxis type="number" domain={[0,100]} tickFormatter={(v)=>`${v}%`} tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><YAxis type="category" dataKey="category" tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11} width={72}/><Tooltip formatter={(value)=>`${value}%`} contentStyle={{ background:"var(--panel-solid)",border:"1px solid var(--border)",borderRadius:12 }}/><Bar dataKey="share" fill="var(--accent)" radius={[0,6,6,0]}/>
         </BarChart></ResponsiveContainer>:<ResponsiveContainer width="100%" height={330}><AreaChart data={shareData} margin={{ top:20,right:12,left:-18,bottom:0 }}>
           <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><YAxis tickFormatter={(v) => `${v}%`} tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/>
@@ -245,15 +407,17 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
         </AreaChart></ResponsiveContainer>}
       </section>
       <section className="chart-box large"><div className="section-head compact"><div><span>CHURN</span><h2>진입 · 이탈</h2></div></div>
-        {isLive?<div className="snapshot-note"><Database/><strong>비교 스냅샷 준비 중</strong><p>현재 API는 한 시점의 인기 영상만 제공합니다. D1에 시간별 순위를 저장한 뒤 진입·이탈을 계산합니다.</p></div>:<ResponsiveContainer width="100%" height={330}><BarChart data={shareData} margin={{ top:20,right:12,left:-24,bottom:0 }}>
+        {isLive&&churnHistory.length?<ResponsiveContainer width="100%" height={330}><BarChart data={churnHistory} margin={{ top:20,right:12,left:-24,bottom:0 }}>
+          <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><YAxis allowDecimals={false} tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><Tooltip contentStyle={{ background:"var(--panel-solid)",border:"1px solid var(--border)",borderRadius:12 }}/><Bar dataKey="entered" name="진입" fill="var(--accent)" radius={[5,5,0,0]}/><Bar dataKey="exited" name="이탈" fill="var(--danger)" radius={[5,5,0,0]}/>
+        </BarChart></ResponsiveContainer>:isLive?<div className="snapshot-note"><Database/><strong>{analyticsState==="unavailable"?"D1 연결 필요":"비교 스냅샷 준비 중"}</strong><p>{analyticsState==="unavailable"?"D1 바인딩과 마이그레이션을 적용하면 15분 예약 수집이 시작됩니다.":"두 번째 시간 구간부터 인기 목록의 진입·이탈을 자동 계산합니다."}</p></div>:<ResponsiveContainer width="100%" height={330}><BarChart data={shareData} margin={{ top:20,right:12,left:-24,bottom:0 }}>
           <CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><YAxis tickLine={false} axisLine={false} stroke="var(--muted-fg)" fontSize={11}/><Tooltip contentStyle={{ background:"var(--panel-solid)",border:"1px solid var(--border)",borderRadius:12 }}/><Bar dataKey="entered" fill="var(--accent)" radius={[5,5,0,0]}/><Bar dataKey="exited" fill="var(--danger)" radius={[5,5,0,0]}/>
         </BarChart></ResponsiveContainer>}
       </section>
     </div>
     <section className="brief-panel"><div className="brief-mark"><Radio /></div><div className="brief-main">
-      <div className="section-head compact"><div><span>SNAPSHOT BRIEF</span><h2>트렌드 한 줄보다 깊게</h2></div><span className="model-chip">{isLive?"LIVE DATA":"SAMPLE ANALYSIS"}</span></div>
+      <div className="section-head compact"><div><span>SNAPSHOT BRIEF</span><h2>트렌드 한 줄보다 깊게</h2></div><span className="model-chip">{analyticsState==="ready"?"D1 HISTORY":isLive?"LIVE DATA":"SAMPLE ANALYSIS"}</span></div>
       <div className="brief-tabs">{[["today","오늘의 브리핑"],["compare","어제와 비교"],["report","7일 리포트"]].map(([id,label]) => <button key={id} className={briefType === id ? "active" : ""} onClick={() => setBriefType(id)}>{label}</button>)}</div>
-      <p>{briefs[briefType]}</p><div className="brief-foot"><span><Check/> 규칙 기반 스냅샷 분석</span><small>{isLive?"YouTube Data API 현재 데이터 기준":"샘플 스냅샷 기준"}</small></div>
+      <p>{briefs[briefType]}</p><div className="brief-foot"><span><Check/> 규칙 기반 스냅샷 분석</span><small>{analyticsState==="ready"?`D1 ${storageStatus?.snapshotCount ?? 0}개 스냅샷`:isLive?"YouTube Data API 현재 데이터 기준":"샘플 스냅샷 기준"}</small></div>
     </div></section>
   </main>;
 }
@@ -419,7 +583,7 @@ export default function Home() {
       <TabsContent value="home" className="tab-content">
         {!dataLoading&&!isLive&&<div className="data-alert" role="status"><AlertTriangle/><strong>현재 샘플 데이터 표시 중</strong><span>{dataError??"YouTube 실데이터 연결에 실패했습니다."}</span><button onClick={refresh} disabled={refreshing}>{refreshing?"확인 중":"다시 확인"}</button></div>}
         <Hero video={heroVideo} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined}/>{selected&&<HistoryPanel video={selected}/>}
-        <section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>{isLive?"현재":"샘플"}</em></div><div><TrendingUp/><span>평균 조회 속도</span><b>{fmt(fastest.velocity)}/시</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 범위</span><b>{metricVideos.length}개 영상</b></div></section>
+        <section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>{isLive?"현재":"샘플"}</em></div><div><TrendingUp/><span>{fastest.velocityKind==="snapshot"?"최근 조회 속도":"평균 조회 속도"}</span><b>{fmt(fastest.velocity)}/시</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 범위</span><b>{metricVideos.length}개 영상</b></div></section>
         <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
           {groups.map((group)=>{const groupRows=baseRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={!activeCategory&&focus===row.id?"active":""} onClick={()=>selectRow(row.id)}>{row.label}</button>)}</Fragment>})}
           <h3>분야</h3>
@@ -435,6 +599,6 @@ export default function Home() {
       <TabsContent value="series" className="tab-content"><SeriesView videos={allVideos}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={allVideos} isLive={isLive}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
-    <footer><span>PULSETUBE RADAR</span><p>{isLive?"YouTube Data API v3 · 대한민국 현재 인기 영상 · 15분 엣지 캐시":"샘플 데이터 · 실시간 API 연결 실패 시 자동 폴백"}</p></footer>
+    <footer><span>PULSETUBE RADAR</span><p>{isLive?"YouTube Data API v3 · 대한민국 현재 인기 영상 · D1 연결 시 15분 스냅샷":"샘플 데이터 · 실시간 API 연결 실패 시 자동 폴백"}</p></footer>
   </div>;
 }

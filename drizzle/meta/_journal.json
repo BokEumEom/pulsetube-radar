@@ -1,5 +1,13 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "entries": []
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787896778852,
+      "tag": "0000_sweet_invaders",
+      "breakpoints": true
+    }
+  ]
 }

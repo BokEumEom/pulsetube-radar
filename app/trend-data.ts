@@ -2,10 +2,12 @@ export type TrendVideo = {
   id: string;
   title: string;
   channel: string;
+  categoryId?: string | null;
   category: string;
   views: number;
   likes: number;
   velocity: number;
+  velocityKind?: "snapshot" | "lifetime";
   delta: number | null;
   rank: number;
   isNew?: boolean;
@@ -230,6 +232,9 @@ export const rows: TrendRow[] = [
 ];
 
 export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
+  const usesSnapshotVelocity = liveVideos.some(
+    (video) => video.velocityKind === "snapshot",
+  );
   const top = liveVideos.slice(0, 10);
   const fastest = [...liveVideos]
     .sort((a, b) => b.velocity - a.velocity)
@@ -260,9 +265,11 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
     {
       id: "velocity",
       group: "랭킹",
-      label: "평균 조회 속도",
-      title: "게시 이후 평균 조회 속도",
-      hint: "누적 조회수 ÷ 공개 후 경과 시간",
+      label: usesSnapshotVelocity ? "실제 조회 급증" : "평균 조회 속도",
+      title: usesSnapshotVelocity ? "최근 수집 구간 조회 속도" : "게시 이후 평균 조회 속도",
+      hint: usesSnapshotVelocity
+        ? "직전 스냅샷 대비 시간당 조회 증가"
+        : "누적 조회수 ÷ 공개 후 경과 시간",
       videoIds: fastest.map((video) => video.id),
     },
   ];

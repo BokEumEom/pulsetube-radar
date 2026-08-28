@@ -1,6 +1,17 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import {
+  pruneSnapshots,
+  readCategoryTrends,
+  readChurn,
+  readLatestSnapshot,
+  readStorageStatus,
+  readVideoHistory,
+  saveSnapshot,
+  scopeForCategory,
+  type TrendSnapshotVideo,
+} from "./youtube-store";
 
 interface Env {
   ASSETS: Fetcher;
@@ -90,7 +101,7 @@ const asCount = (value?: string) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-function buildTrendingVideo(item: YouTubeVideoItem, index: number) {
+function buildTrendingVideo(item: YouTubeVideoItem, index: number): TrendSnapshotVideo | null {
   if (!item.id || !item.snippet) return null;
 
   const views = asCount(item.statistics?.viewCount);
@@ -105,10 +116,12 @@ function buildTrendingVideo(item: YouTubeVideoItem, index: number) {
     id: item.id,
     title: item.snippet.title ?? "제목 없음",
     channel: item.snippet.channelTitle ?? "채널 정보 없음",
+    categoryId: item.snippet.categoryId ?? null,
     category,
     views,
     likes: asCount(item.statistics?.likeCount),
     velocity: Math.round(views / ageInHours),
+    velocityKind: "lifetime" as const,
     delta: null,
     rank: index + 1,
     thumbnail:
@@ -127,22 +140,126 @@ function buildTrendingVideo(item: YouTubeVideoItem, index: number) {
   };
 }
 
+class YouTubeApiError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+async function fetchYouTubeTrending(
+  env: Env,
+  categoryId: string | null,
+): Promise<TrendSnapshotVideo[]> {
+  if (!env.YT_API_KEY) {
+    throw new YouTubeApiError(
+      "YT_API_KEY가 Cloudflare Worker Runtime Secret에 설정되지 않았습니다.",
+      "missing_api_key",
+      503,
+    );
+  }
+
+  const apiUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
+  const apiParams = new URLSearchParams({
+    part: "snippet,statistics",
+    chart: "mostPopular",
+    regionCode: "KR",
+    maxResults: "25",
+    key: env.YT_API_KEY,
+  });
+  if (categoryId) apiParams.set("videoCategoryId", categoryId);
+  apiUrl.search = apiParams.toString();
+
+  const upstream = await fetch(apiUrl, { headers: { Accept: "application/json" } });
+  if (!upstream.ok) {
+    console.error("YouTube Data API request failed", upstream.status);
+    throw new YouTubeApiError(
+      upstream.status === 403
+        ? "YouTube API 요청이 거부되었습니다. API 활성화, 키 제한, 할당량을 확인해 주세요."
+        : "YouTube 인기 영상을 불러오지 못했습니다.",
+      upstream.status === 403 ? "youtube_api_denied" : "youtube_api_error",
+      upstream.status === 429 ? 429 : 502,
+    );
+  }
+
+  const data = (await upstream.json()) as YouTubeVideosResponse;
+  const videos = (data.items ?? [])
+    .map(buildTrendingVideo)
+    .filter((video): video is TrendSnapshotVideo => Boolean(video));
+
+  if (!videos.length) {
+    throw new YouTubeApiError(
+      "YouTube API returned no videos.",
+      "empty_result",
+      502,
+    );
+  }
+
+  return videos;
+}
+
+async function collectScope(env: Env, categoryId: string | null) {
+  const capturedAtSeconds = Math.floor(Date.now() / 1000);
+  const videos = await fetchYouTubeTrending(env, categoryId);
+
+  if (!env.DB) {
+    return {
+      capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
+      videos,
+    };
+  }
+
+  try {
+    const savedVideos = await saveSnapshot(env.DB, {
+      scope: scopeForCategory(categoryId),
+      categoryId,
+      capturedAt: capturedAtSeconds,
+      videos,
+    });
+    return {
+      capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
+      videos: savedVideos,
+    };
+  } catch (error) {
+    console.error("D1 snapshot save failed; serving current YouTube data", error);
+    return {
+      capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
+      videos,
+    };
+  }
+}
+
+const trendingResponse = (
+  categoryId: string | null,
+  capturedAt: string,
+  videos: TrendSnapshotVideo[],
+  historyEnabled: boolean,
+) =>
+  jsonResponse(
+    {
+      source: "youtube",
+      region: "KR",
+      category: categoryId
+        ? { id: categoryId, label: CATEGORY_NAMES[categoryId] ?? "기타" }
+        : null,
+      capturedAt,
+      historyEnabled,
+      videos,
+    },
+    200,
+    {
+      "Cache-Control": "public, max-age=300, s-maxage=900, stale-while-revalidate=3600",
+    },
+  );
+
 async function handleYouTubeTrending(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  if (!env.YT_API_KEY) {
-    return jsonResponse(
-      {
-        error: "YT_API_KEY가 Cloudflare Worker Runtime Secret에 설정되지 않았습니다.",
-        code: "missing_api_key",
-      },
-      503,
-      { "Cache-Control": "no-store" },
-    );
-  }
-
   const requestUrl = new URL(request.url);
   const categoryId = requestUrl.searchParams.get("category");
   if (categoryId && !FEATURED_CATEGORY_IDS.has(categoryId)) {
@@ -165,71 +282,108 @@ async function handleYouTubeTrending(
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
 
-  const apiUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
-  const apiParams = new URLSearchParams({
-    part: "snippet,statistics",
-    chart: "mostPopular",
-    regionCode: "KR",
-    maxResults: "25",
-    key: env.YT_API_KEY,
-  });
-  if (categoryId) apiParams.set("videoCategoryId", categoryId);
-  apiUrl.search = apiParams.toString();
-
-  const upstream = await fetch(apiUrl, {
-    headers: { Accept: "application/json" },
-  });
-
-  if (!upstream.ok) {
-    console.error("YouTube Data API request failed", upstream.status);
-    const code = upstream.status === 403 ? "youtube_api_denied" : "youtube_api_error";
-    return jsonResponse(
-      {
-        error:
-          upstream.status === 403
-            ? "YouTube API 요청이 거부되었습니다. API 활성화, 키 제한, 할당량을 확인해 주세요."
-            : "YouTube 인기 영상을 불러오지 못했습니다.",
-        code,
-      },
-      upstream.status === 429 ? 429 : 502,
-      { "Cache-Control": "no-store" },
-    );
+  const scope = scopeForCategory(categoryId);
+  if (env.DB) {
+    try {
+      const stored = await readLatestSnapshot(env.DB, scope);
+      if (stored) {
+        const response = trendingResponse(
+          categoryId,
+          stored.capturedAt,
+          stored.videos,
+          true,
+        );
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+        return response;
+      }
+    } catch (error) {
+      console.error("D1 snapshot read failed; falling back to YouTube", error);
+    }
   }
 
-  const data = (await upstream.json()) as YouTubeVideosResponse;
-  const videos = (data.items ?? [])
-    .map(buildTrendingVideo)
-    .filter((video): video is NonNullable<typeof video> => Boolean(video));
-
-  if (!videos.length) {
+  let collected: Awaited<ReturnType<typeof collectScope>>;
+  try {
+    collected = await collectScope(env, categoryId);
+  } catch (error) {
+    if (error instanceof YouTubeApiError) {
+      return jsonResponse(
+        { error: error.message, code: error.code },
+        error.status,
+        { "Cache-Control": "no-store" },
+      );
+    }
+    console.error("YouTube collection failed", error);
     return jsonResponse(
-      { error: "YouTube API returned no videos.", code: "empty_result" },
+      { error: "YouTube 인기 영상을 불러오지 못했습니다.", code: "youtube_api_error" },
       502,
       { "Cache-Control": "no-store" },
     );
   }
 
-  const response = jsonResponse(
-    {
-      source: "youtube",
-      region: "KR",
-      category: categoryId
-        ? {
-            id: categoryId,
-            label: CATEGORY_NAMES[categoryId] ?? "기타",
-          }
-        : null,
-      capturedAt: new Date().toISOString(),
-      videos,
-    },
-    200,
-    {
-      "Cache-Control": "public, max-age=300, s-maxage=900, stale-while-revalidate=3600",
-    },
+  const response = trendingResponse(
+    categoryId,
+    collected.capturedAt,
+    collected.videos,
+    Boolean(env.DB),
   );
 
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
   return response;
+}
+
+const requestedHours = (url: URL) => {
+  const parsed = Number(url.searchParams.get("hours") ?? 168);
+  return Number.isFinite(parsed) ? Math.min(720, Math.max(24, Math.round(parsed))) : 168;
+};
+
+const storageUnavailable = () =>
+  jsonResponse(
+    {
+      error: "D1 데이터베이스가 아직 연결되지 않았습니다.",
+      code: "storage_unavailable",
+    },
+    503,
+    { "Cache-Control": "no-store" },
+  );
+
+class RequestValidationError extends Error {}
+
+async function handleStorageRequest(
+  request: Request,
+  env: Env,
+  reader: (db: D1Database, url: URL) => Promise<unknown>,
+) {
+  if (request.method !== "GET") {
+    return jsonResponse(
+      { error: "Method not allowed", code: "method_not_allowed" },
+      405,
+      { Allow: "GET", "Cache-Control": "no-store" },
+    );
+  }
+  if (!env.DB) return storageUnavailable();
+
+  try {
+    return jsonResponse(await reader(env.DB, new URL(request.url)), 200, {
+      "Cache-Control": "public, max-age=60, s-maxage=300",
+    });
+  } catch (error) {
+    if (error instanceof RequestValidationError) {
+      return jsonResponse(
+        { error: error.message, code: "invalid_request" },
+        400,
+        { "Cache-Control": "no-store" },
+      );
+    }
+    console.error("D1 analytics query failed", error);
+    return jsonResponse(
+      {
+        error: "D1 스키마 적용 또는 스냅샷 수집 상태를 확인해 주세요.",
+        code: "storage_not_ready",
+      },
+      503,
+      { "Cache-Control": "no-store" },
+    );
+  }
 }
 
 interface ExecutionContext {
@@ -256,6 +410,45 @@ const worker = {
         );
       }
       return handleYouTubeTrending(request, env, ctx);
+    }
+
+    if (url.pathname === "/api/youtube/history") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const videoId = requestUrl.searchParams.get("videoId") ?? "";
+        if (!/^[A-Za-z0-9_-]{6,32}$/.test(videoId)) {
+          throw new RequestValidationError("올바른 YouTube videoId가 필요합니다.");
+        }
+        const hours = requestedHours(requestUrl);
+        return {
+          videoId,
+          hours,
+          points: await readVideoHistory(db, videoId, hours),
+        };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/category-trends") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const hours = requestedHours(requestUrl);
+        return {
+          hours,
+          points: await readCategoryTrends(db, hours),
+        };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/churn") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const hours = requestedHours(requestUrl);
+        return {
+          hours,
+          points: await readChurn(db, hours),
+        };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/storage-status") {
+      return handleStorageRequest(request, env, async (db) => readStorageStatus(db));
     }
 
     if (url.pathname === "/api/youtube/categories") {
@@ -285,6 +478,33 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+
+  async scheduled(
+    _controller: { scheduledTime: number; cron: string },
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
+    if (!env.DB || !env.YT_API_KEY) return;
+
+    ctx.waitUntil((async () => {
+      const categoryIds: Array<string | null> = [
+        null,
+        ...FEATURED_CATEGORIES.map((category) => category.id),
+      ];
+      const results = await Promise.allSettled(
+        categoryIds.map((categoryId) => collectScope(env, categoryId)),
+      );
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          console.error(
+            `Scheduled YouTube collection failed for ${categoryIds[index] ?? "all"}`,
+            result.reason,
+          );
+        }
+      });
+      await pruneSnapshots(env.DB);
+    })());
   },
 };
 

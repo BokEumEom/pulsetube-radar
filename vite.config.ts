@@ -43,6 +43,9 @@ export default defineConfig(async () => {
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
 
   const { d1, r2 } = await loadHostingConfig();
+  const externalD1DatabaseId = process.env.D1_DATABASE_ID?.trim();
+  const externalD1DatabaseName =
+    process.env.D1_DATABASE_NAME?.trim() || "pulsetube-radar-history";
   const localBindingConfig = {
     main: "./worker/index.ts",
     compatibility_flags: ["nodejs_compat"],
@@ -52,7 +55,15 @@ export default defineConfig(async () => {
     secrets: {
       required: ["YT_API_KEY"],
     },
-    d1_databases: d1
+    d1_databases: externalD1DatabaseId
+      ? [
+          {
+            binding: "DB",
+            database_name: externalD1DatabaseName,
+            database_id: externalD1DatabaseId,
+          },
+        ]
+      : d1
       ? [
           {
             binding: d1,
@@ -69,6 +80,9 @@ export default defineConfig(async () => {
           },
         ]
       : [],
+    triggers: {
+      crons: ["*/15 * * * *"],
+    },
   };
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.

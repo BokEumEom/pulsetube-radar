@@ -37,3 +37,50 @@ test("rejects unsupported category ids before calling YouTube", async () => {
   assert.equal(response.status, 400);
   assert.equal(body.code, "invalid_category");
 });
+
+test("keeps D1 analytics endpoints explicit when storage is not connected", async () => {
+  for (const path of [
+    "/api/youtube/history?videoId=abcdefghijk&hours=168",
+    "/api/youtube/category-trends?hours=168",
+    "/api/youtube/churn?hours=168",
+    "/api/youtube/storage-status",
+  ]) {
+    const response = await worker.fetch(
+      new Request(`http://localhost${path}`),
+      {},
+      context,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 503, path);
+    assert.equal(body.code, "storage_unavailable", path);
+  }
+});
+
+test("rejects writes to read-only analytics endpoints", async () => {
+  const response = await worker.fetch(
+    new Request("http://localhost/api/youtube/churn", { method: "POST" }),
+    {},
+    context,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("Allow"), "GET");
+  assert.equal(body.code, "method_not_allowed");
+});
+
+test("scheduled collection is a safe no-op until D1 and the API key exist", async () => {
+  let waitUntilCalls = 0;
+  await worker.scheduled(
+    { scheduledTime: Date.now(), cron: "*/15 * * * *" },
+    {},
+    {
+      ...context,
+      waitUntil() {
+        waitUntilCalls += 1;
+      },
+    },
+  );
+
+  assert.equal(waitUntilCalls, 0);
+});
