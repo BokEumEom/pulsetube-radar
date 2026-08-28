@@ -20,13 +20,30 @@ export type TrendVideo = {
 
 export type TrendRow = {
   id: string;
-  group: "랭킹" | "YouTube Music" | "AI 추천" | "분야" | "국가" | "채널";
+  group: "랭킹" | "YouTube Music" | "분야" | "국가" | "채널";
   label: string;
   title: string;
   hint?: string;
   topStyle?: boolean;
   videoIds: string[];
 };
+
+export type YouTubeCategory = {
+  id: string;
+  label: string;
+  title: string;
+};
+
+export const YOUTUBE_CATEGORIES: YouTubeCategory[] = [
+  { id: "10", label: "음악", title: "대한민국 음악 인기 영상" },
+  { id: "20", label: "게임", title: "대한민국 게임 인기 영상" },
+  { id: "24", label: "엔터테인먼트", title: "대한민국 엔터테인먼트 인기 영상" },
+  { id: "25", label: "뉴스·정치", title: "대한민국 뉴스·정치 인기 영상" },
+  { id: "17", label: "스포츠", title: "대한민국 스포츠 인기 영상" },
+  { id: "1", label: "영화·애니메이션", title: "대한민국 영화·애니메이션 인기 영상" },
+  { id: "28", label: "과학기술", title: "대한민국 과학기술 인기 영상" },
+  { id: "23", label: "코미디", title: "대한민국 코미디 인기 영상" },
+];
 
 const history = (rank: number, views: number, seed: number) =>
   ["6일 전", "5일 전", "4일 전", "3일 전", "2일 전", "어제", "지금"].map(
@@ -208,8 +225,6 @@ export const rows: TrendRow[] = [
   { id: "velocity", group: "랭킹", label: "조회수 급증", title: "지금 가장 빠르게 뜨는 영상", hint: "시간당 증가 기준", videoIds: [...videos].sort((a, b) => b.velocity - a.velocity).slice(0, 7).map((video) => video.id) },
   { id: "new", group: "랭킹", label: "오늘 첫 진입", title: "오늘 첫 진입", hint: "이전 스냅샷에 없던 영상", videoIds: [videos[7].id, videos[5].id, videos[9].id, videos[3].id] },
   { id: "music", group: "YouTube Music", label: "대한민국 차트", title: "YouTube Music · 대한민국", hint: "공식 차트", videoIds: [videos[0].id, videos[2].id, videos[1].id, videos[6].id, videos[8].id] },
-  { id: "energy", group: "AI 추천", label: "도파민 충전소", title: "도파민 충전이 필요할 때", hint: "AI 태깅 · 추정", videoIds: [videos[0].id, videos[4].id, videos[5].id, videos[7].id] },
-  { id: "focus", group: "AI 추천", label: "집중 플레이", title: "몰입이 필요한 순간", hint: "AI 태깅 · 추정", videoIds: [videos[6].id, videos[2].id, videos[8].id, videos[3].id] },
   { id: "entertainment", group: "분야", label: "엔터테인먼트", title: "엔터테인먼트는 지금", videoIds: [videos[5].id, videos[7].id, videos[9].id, videos[0].id, videos[3].id] },
   { id: "global", group: "국가", label: "글로벌 교차", title: "한국과 글로벌에서 함께 뜨는 영상", videoIds: [videos[1].id, videos[2].id, videos[3].id, videos[4].id, videos[6].id] },
 ];
@@ -292,6 +307,21 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
   }
 
   return liveRows;
+}
+
+export function buildCategoryRow(
+  category: YouTubeCategory,
+  categoryVideos: TrendVideo[],
+): TrendRow {
+  return {
+    id: `category-${category.id}`,
+    group: "분야",
+    label: category.label,
+    title: category.title,
+    hint: "YouTube Data API 카테고리별 현재 인기",
+    topStyle: true,
+    videoIds: categoryVideos.map((video) => video.id),
+  };
 }
 
 export const shareData = [

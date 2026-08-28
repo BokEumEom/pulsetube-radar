@@ -7,19 +7,21 @@ import {
 } from "recharts";
 import {
   AlertTriangle, ArrowLeft, BarChart3, Check, ChevronLeft, ChevronRight,
-  Clock3, Database, Flame, Palette, Play, RefreshCw, Search, Sparkles,
-  TrendingUp,
+  Clock3, Database, Flame, Palette, Play, Radio, RefreshCw, Search,
+  TrendingUp, Users,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  buildCategoryRow,
   buildLiveRows,
   rows as demoRows,
   shareData,
   themes,
   videos as demoVideos,
+  YOUTUBE_CATEGORIES,
   type TrendRow,
   type TrendVideo,
 } from "./trend-data";
@@ -28,6 +30,7 @@ type TrendingApiResponse = {
   source: "youtube";
   region: "KR";
   capturedAt: string;
+  category: { id: string; label: string } | null;
   videos: TrendVideo[];
 };
 
@@ -39,8 +42,9 @@ const formatCapturedAt = (value: string) =>
     timeZone: "Asia/Seoul",
   }).format(new Date(value));
 
-async function requestTrendingVideos(signal?: AbortSignal): Promise<TrendingApiResponse> {
-  const response = await fetch("/api/youtube/trending", { signal, cache: "no-store" });
+async function requestTrendingVideos(categoryId?: string, signal?: AbortSignal): Promise<TrendingApiResponse> {
+  const search = categoryId ? `?${new URLSearchParams({ category: categoryId })}` : "";
+  const response = await fetch(`/api/youtube/trending${search}`, { signal, cache: "no-store" });
   let body: TrendingApiResponse & { error?: string; code?: string };
   try {
     body = (await response.json()) as TrendingApiResponse & { error?: string; code?: string };
@@ -86,7 +90,7 @@ function VideoTile({ video, index, topStyle, onSelect }: {
     </span>
     <span className="hover-preview" aria-hidden="true">
       <b>{video.title}</b><small>{video.category} · {video.tags.join(" · ")}</small>
-      <p><span>{video.source === "youtube" ? "LIVE" : "AI"}</span>{video.aiNote}</p>
+      <p><span>SIGNAL</span>{video.aiNote}</p>
     </span>
   </button>;
 }
@@ -107,24 +111,51 @@ function TrendStrip({ row, videos, onSelect }: { row: TrendRow; videos: TrendVid
   </section>;
 }
 
-function Hero({ video, isSelection, onClear, onQuiz }: {
-  video: TrendVideo; isSelection: boolean; onClear: () => void; onQuiz: () => void;
+function ChannelStrip({ videos, onSelect }: {
+  videos: TrendVideo[];
+  onSelect: (video: TrendVideo) => void;
+}) {
+  const channels = useMemo(() => {
+    const grouped = new Map<string, { channel: string; views: number; count: number; video: TrendVideo }>();
+    videos.forEach((video) => {
+      const current = grouped.get(video.channel);
+      if (current) {
+        current.views += video.views;
+        current.count += 1;
+      } else {
+        grouped.set(video.channel, { channel: video.channel, views: video.views, count: 1, video });
+      }
+    });
+    return [...grouped.values()].sort((a, b) => b.views - a.views).slice(0, 8);
+  }, [videos]);
+
+  return <section className="channel-row" aria-label="지금 뜨는 채널">
+    <div className="row-title"><Users/><h2>지금 뜨는 채널</h2><span>현재 인기 영상 기준</span></div>
+    <div className="channel-strip">
+      {channels.map((item) => <button key={item.channel} onClick={() => onSelect(item.video)}>
+        <img src={item.video.thumbnail} alt="" loading="lazy"/>
+        <span><b>{item.channel}</b><small>조회 {fmt(item.views)} · {item.count}개 영상</small></span>
+      </button>)}
+    </div>
+  </section>;
+}
+
+function Hero({ video, isSelection, onClear, scopeLabel }: {
+  video: TrendVideo; isSelection: boolean; onClear: () => void; scopeLabel?: string;
 }) {
   return <section className="hero">
     <img className="hero-image" src={`https://i.ytimg.com/vi/${video.id}/maxresdefault.jpg`} alt="" />
     <div className="hero-wash" />
     <div className="hero-copy">
-      <div className="eyebrow"><span>{isSelection ? `급상승 ${video.rank}위` : "지금 한국 1위"}</span>
+      <div className="eyebrow"><span>{isSelection ? `현재 ${video.rank}위` : scopeLabel ? `${scopeLabel} 1위` : "지금 한국 1위"}</span>
         <span className="category-chip">{video.category}</span>{video.isNew && <span className="new-chip">오늘 첫 진입</span>}
       </div>
       <h1>{video.title}</h1><p>{video.description}</p>
-      <div className="ai-line"><span>{video.source === "youtube" ? "LIVE" : "AI"}</span>{video.aiNote}</div>
+      <div className="ai-line"><span>SIGNAL</span>{video.aiNote}</div>
       <div className="hero-meta">{video.channel} · 조회 {fmt(video.views)} · 좋아요 {fmt(video.likes)} · <b>{video.source === "youtube" ? "게시 후 평균 " : "+"}{fmt(video.velocity)}/시</b></div>
       <div className="hero-actions">
         <a href={`https://www.youtube.com/watch?v=${video.id}`} target="_blank" rel="noreferrer" className="primary-action"><Play fill="currentColor" /> 보러가기</a>
-        <button className="secondary-action" onClick={isSelection ? onClear : onQuiz}>
-          {isSelection ? <><ArrowLeft /> 홈 화면으로</> : <><Sparkles /> 내 취향 찾기</>}
-        </button>
+        {isSelection && <button className="secondary-action" onClick={onClear}><ArrowLeft /> 목록으로</button>}
       </div>
     </div>
     <div className="live-pill"><span /> {video.source === "youtube" ? "YOUTUBE LIVE" : "SAMPLE DATA"}</div>
@@ -198,7 +229,7 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
   } : {
     today:"음악 카테고리의 점유율이 57%까지 확대됐습니다. 상위권에서는 오래된 글로벌 히트곡의 재진입이 두드러지고, 짧은 댄스·커버 콘텐츠가 원본 영상으로 조회를 되돌리는 흐름이 강합니다.",
     compare:"어제보다 음악 비중이 3%p 늘었고 엔터테인먼트는 1%p 줄었습니다. 신규 진입은 3건 감소했지만 상위 10개 영상의 평균 시간당 조회는 8.4% 증가했습니다.",
-    report:"최근 7일은 신규 대형 영상 한 편보다 기존 히트곡이 서로 다른 커뮤니티에서 반복 재발견되는 패턴이 중심입니다. 다음 수집에서는 AI·게임 분야의 신규 진입과 음악 점유율 60% 돌파 여부를 확인할 필요가 있습니다.",
+    report:"최근 7일은 신규 대형 영상 한 편보다 기존 히트곡이 서로 다른 커뮤니티에서 반복 재발견되는 패턴이 중심입니다. 다음 수집에서는 게임·과학기술 분야의 신규 진입과 음악 점유율 60% 돌파 여부를 확인할 필요가 있습니다.",
   };
   return <main className="subpage">
     <div className="page-heading"><div><span>CATEGORY PULSE</span><h1>점유율 · 리포트</h1><p>{isLive?"현재 인기 영상의 분야 구성을 읽습니다.":"무엇이 커지고 무엇이 빠지는지 7일 흐름으로 읽습니다."}</p></div><BarChart3 /></div>
@@ -219,35 +250,12 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
         </BarChart></ResponsiveContainer>}
       </section>
     </div>
-    <section className="brief-panel"><div className="brief-mark"><Sparkles /></div><div className="brief-main">
-      <div className="section-head compact"><div><span>{isLive?"SNAPSHOT BRIEF":"AI BRIEFING"}</span><h2>트렌드 한 줄보다 깊게</h2></div><span className="model-chip">{isLive?"LIVE DATA":"LLM READY"}</span></div>
+    <section className="brief-panel"><div className="brief-mark"><Radio /></div><div className="brief-main">
+      <div className="section-head compact"><div><span>SNAPSHOT BRIEF</span><h2>트렌드 한 줄보다 깊게</h2></div><span className="model-chip">{isLive?"LIVE DATA":"SAMPLE ANALYSIS"}</span></div>
       <div className="brief-tabs">{[["today","오늘의 브리핑"],["compare","어제와 비교"],["report","7일 리포트"]].map(([id,label]) => <button key={id} className={briefType === id ? "active" : ""} onClick={() => setBriefType(id)}>{label}</button>)}</div>
-      <p>{briefs[briefType]}</p><div className="brief-foot"><span><Check/> 스냅샷 분석 완료</span><small>{isLive?"YouTube Data API 현재 데이터 기준":"실운영 시 OpenAI·Claude·Workers AI 연결"}</small></div>
+      <p>{briefs[briefType]}</p><div className="brief-foot"><span><Check/> 규칙 기반 스냅샷 분석</span><small>{isLive?"YouTube Data API 현재 데이터 기준":"샘플 스냅샷 기준"}</small></div>
     </div></section>
   </main>;
-}
-
-function QuizChoice({ value, selected, onClick, children }: {
-  value:string; selected:string; onClick:(value:string)=>void; children:React.ReactNode;
-}) {
-  return <button className={selected === value ? "quiz-choice active" : "quiz-choice"} onClick={() => onClick(value)}>
-    {selected === value && <Check/>}{children}
-  </button>;
-}
-
-function QuizDialog({ open, onOpenChange, onComplete, videos }: { open:boolean; onOpenChange:(open:boolean)=>void; onComplete:(row:TrendRow)=>void; videos:TrendVideo[] }) {
-  const [mood,setMood] = useState("energy"); const [time,setTime] = useState("short"); const [style,setStyle] = useState("music");
-  const submit = () => {
-    const ordered = mood === "calm" ? [...videos].reverse() : videos;
-    const ids = ordered.slice(0, 4).map((video) => video.id);
-    onComplete({ id:"quiz",group:"AI 추천",label:"나의 추천",title:time === "short" ? "지금 10분, 나를 위한 추천" : "오늘 오래 즐길 추천",hint:`${style === "music" ? "음악 중심" : "이야기 중심"} · 취향 퀴즈`,videoIds:ids }); onOpenChange(false);
-  };
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="trend-dialog quiz-dialog"><DialogHeader><span className="dialog-kicker">TASTE SIGNAL</span><DialogTitle>지금 보고 싶은 분위기는?</DialogTitle><DialogDescription>세 가지 선택으로 현재 트렌드에서 취향에 맞는 영상을 골라드려요.</DialogDescription></DialogHeader>
-    <div className="question"><b>1. 지금의 기분</b><div><QuizChoice value="energy" selected={mood} onClick={setMood}>에너지가 필요해요</QuizChoice><QuizChoice value="calm" selected={mood} onClick={setMood}>차분하게 쉬고 싶어요</QuizChoice></div></div>
-    <div className="question"><b>2. 시청할 시간</b><div><QuizChoice value="short" selected={time} onClick={setTime}>10분 안쪽</QuizChoice><QuizChoice value="long" selected={time} onClick={setTime}>오래 즐기기</QuizChoice></div></div>
-    <div className="question"><b>3. 선호 스타일</b><div><QuizChoice value="music" selected={style} onClick={setStyle}>음악과 퍼포먼스</QuizChoice><QuizChoice value="story" selected={style} onClick={setStyle}>이야기와 맥락</QuizChoice></div></div>
-    <button className="dialog-submit" onClick={submit}><Sparkles/> 내 추천 만들기</button>
-  </DialogContent></Dialog>;
 }
 
 function ThemeDialog({ open, onOpenChange, theme, onTheme }: { open:boolean; onOpenChange:(open:boolean)=>void; theme:string; onTheme:(theme:string)=>void }) {
@@ -257,71 +265,176 @@ function ThemeDialog({ open, onOpenChange, theme, onTheme }: { open:boolean; onO
 }
 
 export default function Home() {
-  const [selected,setSelected] = useState<TrendVideo|null>(null); const [focus,setFocus] = useState<string|null>(null);
-  const [quizOpen,setQuizOpen] = useState(false); const [themeOpen,setThemeOpen] = useState(false); const [quizRow,setQuizRow] = useState<TrendRow|null>(null);
-  const [theme,setTheme] = useState("neon"); const [updatedAt,setUpdatedAt] = useState("--:--"); const [refreshing,setRefreshing] = useState(false);
-  const [liveVideos,setLiveVideos] = useState<TrendVideo[]|null>(null); const [dataError,setDataError] = useState<string|null>(null); const [dataLoading,setDataLoading] = useState(true);
+  const [selected, setSelected] = useState<TrendVideo | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [themeOpen, setThemeOpen] = useState(false);
+  const [theme, setTheme] = useState("neon");
+  const [updatedAt, setUpdatedAt] = useState("--:--");
+  const [refreshing, setRefreshing] = useState(false);
+  const [liveVideos, setLiveVideos] = useState<TrendVideo[] | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [dataLoading, setDataLoading] = useState(true);
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
+  const [categoryCache, setCategoryCache] = useState<Record<string, TrendVideo[]>>({});
+  const [categoryLoading, setCategoryLoading] = useState(false);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+
   useEffect(() => {
-    const stored=window.localStorage.getItem("yt-trend-theme");
-    if(stored&&themes.some((item)=>item.id===stored)) window.setTimeout(() => setTheme(stored), 0);
+    const stored = window.localStorage.getItem("yt-trend-theme");
+    if (stored && themes.some((item) => item.id === stored)) {
+      window.setTimeout(() => setTheme(stored), 0);
+    }
 
     const controller = new AbortController();
-    requestTrendingVideos(controller.signal)
-      .then((data) => {
+    const load = async (silent = false) => {
+      try {
+        const data = await requestTrendingVideos(undefined, controller.signal);
         setLiveVideos(data.videos);
         setUpdatedAt(formatCapturedAt(data.capturedAt));
         setDataError(null);
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setDataError(error instanceof Error ? error.message : "실시간 데이터 연결에 실패했습니다.");
-      })
-      .finally(() => setDataLoading(false));
+        if (!silent) {
+          setDataError(error instanceof Error ? error.message : "실시간 데이터 연결에 실패했습니다.");
+        }
+      } finally {
+        if (!silent) setDataLoading(false);
+      }
+    };
 
-    return () => controller.abort();
-  },[]);
-  const applyTheme=(next:string)=>{setTheme(next);window.localStorage.setItem("yt-trend-theme",next)};
-  const videos = liveVideos ?? demoVideos;
+    void load();
+    const pollId = window.setInterval(() => void load(true), 60_000);
+
+    return () => {
+      controller.abort();
+      window.clearInterval(pollId);
+    };
+  }, []);
+
+  const applyTheme = (next: string) => {
+    setTheme(next);
+    window.localStorage.setItem("yt-trend-theme", next);
+  };
+
+  const allVideos = liveVideos ?? demoVideos;
   const isLive = Boolean(liveVideos);
   const baseRows = useMemo(() => liveVideos ? buildLiveRows(liveVideos) : demoRows, [liveVideos]);
-  const allRows=useMemo(()=>quizRow?[quizRow,...baseRows]:baseRows,[quizRow,baseRows]); const shownRows=focus?allRows.filter((row)=>row.id===focus):allRows;
-  const groups=["랭킹","YouTube Music","AI 추천","분야","국가"];
-  const choose=(video:TrendVideo)=>{setSelected(video);window.scrollTo({top:0,behavior:window.matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"})};
-  const refresh=async()=>{
-    setRefreshing(true);
+  const activeCategory = YOUTUBE_CATEGORIES.find((category) => category.id === activeCategoryId) ?? null;
+  const categoryVideos = activeCategoryId ? categoryCache[activeCategoryId] : undefined;
+  const visibleVideos = activeCategory ? categoryVideos ?? [] : allVideos;
+  const categoryRow = activeCategory && categoryVideos
+    ? buildCategoryRow(activeCategory, categoryVideos)
+    : null;
+  const shownRows = categoryRow
+    ? [categoryRow]
+    : activeCategory
+      ? []
+      : focus
+        ? baseRows.filter((row) => row.id === focus)
+        : baseRows;
+  const groups = ["랭킹", "YouTube Music", "국가"];
+
+  const choose = (video: TrendVideo) => {
+    setSelected(video);
+    window.scrollTo({
+      top: 0,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  };
+
+  const showHome = () => {
+    setSelected(null);
+    setFocus(null);
+    setActiveCategoryId(null);
+    setCategoryError(null);
+  };
+
+  const selectRow = (rowId: string) => {
+    setSelected(null);
+    setActiveCategoryId(null);
+    setCategoryError(null);
+    setFocus(rowId);
+  };
+
+  const selectCategory = async (categoryId: string) => {
+    setSelected(null);
+    setFocus(null);
+    setActiveCategoryId(categoryId);
+    setCategoryError(null);
+    if (categoryCache[categoryId]) return;
+
+    setCategoryLoading(true);
     try {
-      const data = await requestTrendingVideos();
-      setLiveVideos(data.videos); setSelected(null); setUpdatedAt(formatCapturedAt(data.capturedAt)); setDataError(null);
+      const data = await requestTrendingVideos(categoryId);
+      setCategoryCache((current) => ({ ...current, [categoryId]: data.videos }));
+      setUpdatedAt(formatCapturedAt(data.capturedAt));
     } catch (error) {
-      setDataError(error instanceof Error ? error.message : "실시간 데이터 새로고침에 실패했습니다.");
+      setCategoryError(error instanceof Error ? error.message : "카테고리 데이터를 불러오지 못했습니다.");
     } finally {
-      setRefreshing(false); setDataLoading(false);
+      setCategoryLoading(false);
     }
   };
-  const musicShare = Math.round((videos.filter((video)=>video.category==="음악").length / Math.max(1,videos.length)) * 100);
-  const fastest = [...videos].sort((a,b)=>b.velocity-a.velocity)[0] ?? videos[0];
-  const categoryCounts = videos.reduce<Record<string,number>>((counts,video)=>{counts[video.category]=(counts[video.category]??0)+1;return counts},{});
-  const dominantCategory = Object.entries(categoryCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] ?? "기타";
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const data = await requestTrendingVideos(activeCategoryId ?? undefined);
+      if (activeCategoryId) {
+        setCategoryCache((current) => ({ ...current, [activeCategoryId]: data.videos }));
+        setCategoryError(null);
+      } else {
+        setLiveVideos(data.videos);
+        setCategoryCache({});
+        setDataError(null);
+      }
+      setSelected(null);
+      setUpdatedAt(formatCapturedAt(data.capturedAt));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "실시간 데이터 새로고침에 실패했습니다.";
+      if (activeCategoryId) setCategoryError(message);
+      else setDataError(message);
+    } finally {
+      setRefreshing(false);
+      setDataLoading(false);
+    }
+  };
+
+  const metricVideos = visibleVideos.length ? visibleVideos : allVideos;
+  const musicShare = Math.round((metricVideos.filter((video) => video.category === "음악").length / Math.max(1, metricVideos.length)) * 100);
+  const fastest = [...metricVideos].sort((a, b) => b.velocity - a.velocity)[0] ?? metricVideos[0];
+  const categoryCounts = metricVideos.reduce<Record<string, number>>((counts, video) => {
+    counts[video.category] = (counts[video.category] ?? 0) + 1;
+    return counts;
+  }, {});
+  const dominantCategory = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "기타";
+  const heroVideo = selected ?? visibleVideos[0] ?? allVideos[0];
+
   return <div className="trend-app" data-theme={theme}>
     <Tabs defaultValue="home" className="app-tabs">
       <header className="topbar">
-        <button className="brand" onClick={()=>{setSelected(null);setFocus(null)}} aria-label="홈으로"><span className="brand-mark"><TrendingUp/></span><span><b>PULSETUBE</b><small>RADAR</small></span></button>
+        <button className="brand" onClick={showHome} aria-label="홈으로"><span className="brand-mark"><TrendingUp/></span><span><b>PULSETUBE</b><small>RADAR</small></span></button>
         <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
         <div className="capture"><span/> 수집 {updatedAt} KST</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
         {!dataLoading&&!isLive&&<div className="data-alert" role="status"><AlertTriangle/><strong>현재 샘플 데이터 표시 중</strong><span>{dataError??"YouTube 실데이터 연결에 실패했습니다."}</span><button onClick={refresh} disabled={refreshing}>{refreshing?"확인 중":"다시 확인"}</button></div>}
-        <Hero video={selected??videos[0]} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} onQuiz={()=>setQuizOpen(true)}/>{selected&&<HistoryPanel video={selected}/>} 
-        <section className="insight-band" aria-label="오늘의 인사이트"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>{isLive?"현재":"+3%p"}</em></div><div><TrendingUp/><span>{isLive?"평균 조회 속도":"가장 빠른 영상"}</span><b>{isLive?"":"+"}{fmt(fastest.velocity)}/시</b></div><div><Sparkles/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 데이터</span><b>{videos.length}개 영상 · {baseRows.length}개 신호</b></div></section>
-        <div className="home-layout"><aside className="sidebar"><button className={focus===null?"active":""} onClick={()=>setFocus(null)}><span>⌂</span> 홈</button>
-          {groups.map((group)=>{const groupRows=allRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={focus===row.id?"active":""} onClick={()=>setFocus(row.id)}>{row.label}</button>)}</Fragment>})}
-          <div className="source-note"><span>{isLive?"LIVE API":dataLoading?"CONNECTING":"DEMO FALLBACK"}</span><p>{isLive?"YouTube Data API · 대한민국 현재 인기 영상":dataLoading?"실시간 인기 영상을 불러오는 중입니다.":dataError??"샘플 스냅샷을 표시하고 있습니다."}</p>{dataError&&!isLive&&<AlertTriangle aria-hidden="true"/>}</div></aside>
-          <main className="rows-area">{focus&&<button className="focus-back" onClick={()=>setFocus(null)}><ArrowLeft/> 전체 피드로</button>}{shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={videos} onSelect={choose}/>)}</main>
+        <Hero video={heroVideo} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined}/>{selected&&<HistoryPanel video={selected}/>}
+        <section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>{isLive?"현재":"샘플"}</em></div><div><TrendingUp/><span>평균 조회 속도</span><b>{fmt(fastest.velocity)}/시</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 범위</span><b>{metricVideos.length}개 영상</b></div></section>
+        <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
+          {groups.map((group)=>{const groupRows=baseRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={!activeCategory&&focus===row.id?"active":""} onClick={()=>selectRow(row.id)}>{row.label}</button>)}</Fragment>})}
+          <h3>분야</h3>
+          {YOUTUBE_CATEGORIES.map((category)=><button key={category.id} className={activeCategoryId===category.id?"active":""} onClick={()=>void selectCategory(category.id)}>{category.label}</button>)}
+          <div className="source-note"><span>{isLive?"LIVE API":dataLoading?"CONNECTING":"DEMO FALLBACK"}</span><p>{isLive?"60초 자동 확인 · 카테고리별 API 조회":dataLoading?"실시간 인기 영상을 불러오는 중입니다.":dataError??"샘플 스냅샷을 표시하고 있습니다."}</p>{dataError&&!isLive&&<AlertTriangle aria-hidden="true"/>}</div></aside>
+          <main className="rows-area">{(focus||activeCategory)&&<button className="focus-back" onClick={showHome}><ArrowLeft/> 전체 피드로</button>}
+            {categoryLoading&&activeCategory&&<div className="scope-state" role="status"><RefreshCw className="spin"/><strong>{activeCategory.label} 인기 영상을 불러오는 중</strong><span>YouTube Data API 카테고리 조회</span></div>}
+            {!categoryLoading&&categoryError&&activeCategory&&<div className="scope-state error" role="alert"><AlertTriangle/><strong>{activeCategory.label} 데이터를 불러오지 못했습니다</strong><span>{categoryError}</span><button onClick={()=>void selectCategory(activeCategory.id)}>다시 시도</button></div>}
+            {!focus&&!activeCategory&&<ChannelStrip videos={allVideos} onSelect={choose}/>}
+            {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
-      <TabsContent value="series" className="tab-content"><SeriesView videos={videos}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={videos} isLive={isLive}/></TabsContent>
+      <TabsContent value="series" className="tab-content"><SeriesView videos={allVideos}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={allVideos} isLive={isLive}/></TabsContent>
     </Tabs>
-    <QuizDialog open={quizOpen} onOpenChange={setQuizOpen} onComplete={(row)=>{setQuizRow(row);setFocus(null)}} videos={videos}/><ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
+    <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
     <footer><span>PULSETUBE RADAR</span><p>{isLive?"YouTube Data API v3 · 대한민국 현재 인기 영상 · 15분 엣지 캐시":"샘플 데이터 · 실시간 API 연결 실패 시 자동 폴백"}</p></footer>
   </div>;
 }

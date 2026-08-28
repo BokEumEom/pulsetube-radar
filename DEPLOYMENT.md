@@ -6,6 +6,8 @@
 
 - `YT_API_KEY` Worker Runtime Secret
 - `videos.list(chart=mostPopular, regionCode=KR)` 서버 측 호출
+- 고정 8개 분야의 `videoCategoryId`별 조회와 카테고리별 캐시
+- 60초 클라이언트 자동 확인
 - 현재 순위·누적 조회수·좋아요·게시 이후 평균 조회 속도
 - 현재 스냅샷의 카테고리 점유율
 
@@ -26,7 +28,6 @@ Cloudflare 한 플랫폼 안에서 HTTP API, 정적 프런트엔드, 예약 수�
 | APScheduler | Cron Trigger (`scheduled` handler) |
 | DynamoDB | D1 |
 | Secrets Manager | Worker Secrets |
-| Bedrock | Workers AI 또는 OpenAI/Anthropic API + AI Gateway |
 | CloudWatch | Workers Logs + Analytics Engine |
 
 구성:
@@ -34,7 +35,7 @@ Cloudflare 한 플랫폼 안에서 HTTP API, 정적 프런트엔드, 예약 수�
 ```text
 Browser → Cloudflare Worker → D1
                          ↘ YouTube Data API v3
-Cron Trigger → Collector → D1 → AI tagging job
+Cron Trigger → Collector → D1
 ```
 
 권장 디렉터리:
@@ -45,7 +46,6 @@ src/
   api/home.ts          # 홈 피드 조합
   api/history.ts       # 영상/카테고리 시계열
   jobs/collect.ts      # YouTube 수집 + delta 계산
-  jobs/tag.ts          # 선택적 AI 태깅
   db/schema.sql
 ```
 
@@ -54,7 +54,6 @@ src/
 - `YT_API_KEY`: Worker Secret
 - `YT_API_KEY`는 Build Variable이 아닌 Runtime Secret으로 설정
 - 생성되는 Wrangler 설정은 `keep_vars: true`로 대시보드 런타임 값을 보존하고, `secrets.required`로 키 누락 배포를 차단
-- `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`: 선택, AI 브리핑용
 - D1 binding: `DB` (시계열 수집 단계)
 - Cron: `0 * * * *` (시계열 수집 단계)
 - 동일 시간 중복 수집을 막는 `UNIQUE(region, scope, captured_hour)` 제약
@@ -70,9 +69,8 @@ src/
 | 예약 수집 | Vercel Cron → `/api/collect` |
 | 저장소 | Neon/Supabase 등 Marketplace Postgres |
 | 캐시/락 | Upstash Redis 또는 DB advisory lock |
-| AI | Vercel AI SDK + 선택한 모델 공급자 |
 
-`CRON_SECRET`으로 수집 엔드포인트를 보호하고, 데이터베이스의 unique key로 재시도 시 중복 적재를 막습니다. 긴 AI 태깅은 수집 요청과 분리해 Queue 또는 Workflow로 넘기는 편이 안전합니다.
+`CRON_SECRET`으로 수집 엔드포인트를 보호하고, 데이터베이스의 unique key로 재시도 시 중복 적재를 막습니다.
 
 ## 최소 데이터 모델
 
@@ -108,9 +106,8 @@ CREATE INDEX idx_video_history ON video_rankings(video_id, snapshot_id);
 2. 필요한 카테고리 범위 추가 호출
 3. 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수 계산
 4. snapshot + ranking을 한 트랜잭션으로 저장
-5. AI 태깅은 한 스냅샷당 한 번만 비동기로 실행
-6. `/api/home`은 최신 스냅샷과 태그를 조합하고 60초 캐시
-7. 30~90일을 넘긴 원시 랭킹은 정리하고 일 단위 집계만 유지
+5. `/api/home`은 최신 스냅샷을 조합하고 60초 캐시
+6. 30~90일을 넘긴 원시 랭킹은 정리하고 일 단위 집계만 유지
 
 ## 선택 기준
 

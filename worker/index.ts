@@ -54,6 +54,21 @@ const CATEGORY_NAMES: Record<string, string> = {
   "29": "비영리·사회운동",
 };
 
+const FEATURED_CATEGORIES = [
+  { id: "10", label: "음악" },
+  { id: "20", label: "게임" },
+  { id: "24", label: "엔터테인먼트" },
+  { id: "25", label: "뉴스·정치" },
+  { id: "17", label: "스포츠" },
+  { id: "1", label: "영화·애니메이션" },
+  { id: "28", label: "과학기술" },
+  { id: "23", label: "코미디" },
+] as const;
+
+const FEATURED_CATEGORY_IDS: Set<string> = new Set(
+  FEATURED_CATEGORIES.map((category) => category.id),
+);
+
 const jsonResponse = (body: unknown, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), {
     status,
@@ -128,21 +143,38 @@ async function handleYouTubeTrending(
     );
   }
 
+  const requestUrl = new URL(request.url);
+  const categoryId = requestUrl.searchParams.get("category");
+  if (categoryId && !FEATURED_CATEGORY_IDS.has(categoryId)) {
+    return jsonResponse(
+      {
+        error: "지원하지 않는 YouTube 카테고리입니다.",
+        code: "invalid_category",
+      },
+      400,
+      { "Cache-Control": "no-store" },
+    );
+  }
+
   const cacheUrl = new URL(request.url);
-  cacheUrl.search = "";
+  cacheUrl.search = categoryId
+    ? new URLSearchParams({ category: categoryId }).toString()
+    : "";
   const cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
 
   const apiUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
-  apiUrl.search = new URLSearchParams({
+  const apiParams = new URLSearchParams({
     part: "snippet,statistics",
     chart: "mostPopular",
     regionCode: "KR",
     maxResults: "25",
     key: env.YT_API_KEY,
-  }).toString();
+  });
+  if (categoryId) apiParams.set("videoCategoryId", categoryId);
+  apiUrl.search = apiParams.toString();
 
   const upstream = await fetch(apiUrl, {
     headers: { Accept: "application/json" },
@@ -181,6 +213,12 @@ async function handleYouTubeTrending(
     {
       source: "youtube",
       region: "KR",
+      category: categoryId
+        ? {
+            id: categoryId,
+            label: CATEGORY_NAMES[categoryId] ?? "기타",
+          }
+        : null,
       capturedAt: new Date().toISOString(),
       videos,
     },
@@ -218,6 +256,21 @@ const worker = {
         );
       }
       return handleYouTubeTrending(request, env, ctx);
+    }
+
+    if (url.pathname === "/api/youtube/categories") {
+      if (request.method !== "GET") {
+        return jsonResponse(
+          { error: "Method not allowed", code: "method_not_allowed" },
+          405,
+          { Allow: "GET", "Cache-Control": "no-store" },
+        );
+      }
+      return jsonResponse(
+        { region: "KR", categories: FEATURED_CATEGORIES },
+        200,
+        { "Cache-Control": "public, max-age=86400" },
+      );
     }
 
     if (url.pathname === "/_vinext/image") {
