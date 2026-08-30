@@ -26,6 +26,34 @@ test("exposes the eight featured YouTube categories", async () => {
   );
 });
 
+test("exposes Japan and the United States as selectable YouTube regions", async () => {
+  const response = await worker.fetch(
+    new Request("http://localhost/api/youtube/categories?region=JP"),
+    {},
+    context,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.region, "JP");
+  assert.deepEqual(
+    body.regions.map((region) => region.code),
+    ["KR", "JP", "US"],
+  );
+});
+
+test("rejects unsupported regions before calling YouTube", async () => {
+  const response = await worker.fetch(
+    new Request("http://localhost/api/youtube/trending?region=GB"),
+    { YT_API_KEY: "test-key" },
+    context,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(body.code, "invalid_region");
+});
+
 test("rejects unsupported category ids before calling YouTube", async () => {
   const response = await worker.fetch(
     new Request("http://localhost/api/youtube/trending?category=999"),
@@ -40,10 +68,10 @@ test("rejects unsupported category ids before calling YouTube", async () => {
 
 test("keeps D1 analytics endpoints explicit when storage is not connected", async () => {
   for (const path of [
-    "/api/youtube/history?videoId=abcdefghijk&hours=168",
-    "/api/youtube/category-trends?hours=168",
-    "/api/youtube/churn?hours=168",
-    "/api/youtube/storage-status",
+    "/api/youtube/history?videoId=abcdefghijk&hours=168&region=JP",
+    "/api/youtube/category-trends?hours=168&region=US",
+    "/api/youtube/churn?hours=168&region=JP",
+    "/api/youtube/storage-status?region=US",
     "/api/youtube/collector-status",
   ]) {
     const response = await worker.fetch(
