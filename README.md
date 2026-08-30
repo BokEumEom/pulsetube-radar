@@ -36,14 +36,32 @@ The project is independently implemented and does not require AWS infrastructure
 
 ### Architecture
 
-```text
-Browser ──▶ Cloudflare Worker ──▶ YouTube Data API v3
-                    │
-                    ├──▶ Edge Cache
-                    └──▶ D1
-                          ▲
-Cron Trigger (*/15 * * * *) ──▶ Snapshot Collector
+```mermaid
+flowchart LR
+    U["User Browser"] -->|"HTTPS · 60s refresh"| W["Cloudflare Worker<br/>API + Static Assets"]
+    W -->|"Cache lookup / store"| C[("Cloudflare Edge Cache")]
+    W -->|"videos.list · mostPopular"| Y["YouTube Data API v3"]
+    W -->|"latest snapshot / analytics"| D[("Cloudflare D1<br/>DB binding")]
+
+    T["Cron Trigger<br/>*/15 * * * *"] --> S["Scheduled Snapshot Collector"]
+    S -->|"overall + 8 categories"| Y
+    S -->|"snapshots · rankings · run health"| D
+    S -->|"prune data older than 30 days"| D
+
+    R["Runtime Secret<br/>YT_API_KEY"] -.-> W
+    R -.-> S
+    B["Build Variable<br/>D1_DATABASE_ID"] -.->|"generates DB binding"| D
 ```
+
+| Component | Responsibility |
+| --- | --- |
+| Worker + Static Assets | Serves the responsive UI and handles `/api/youtube/*` requests |
+| Edge Cache | Reduces repeated YouTube API calls and improves response latency |
+| YouTube Data API v3 | Supplies the current KR `mostPopular` feed |
+| D1 | Stores snapshots, rankings, momentum metrics, and collector runs |
+| Cron Trigger | Runs the overall and 8-category collector every 15 minutes |
+| Runtime Secret | Keeps `YT_API_KEY` on the server and out of browser bundles |
+| Build Variable | Generates the production `DB` binding without exposing credentials |
 
 The live feed works with only `YT_API_KEY`. D1 is required for scheduled collection, historical charts, rank deltas, and breakout analysis.
 
@@ -136,16 +154,19 @@ AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입�
 - 60초 자동 갱신, 엣지 캐시, 반응형 탐색 메뉴, 10종 컬러 테마
 - 운영 환경에서 샘플 데이터를 섞지 않고 실제 연동 오류와 재시도 상태 표시
 
-### 동작 구조
+### 아키텍처 구성
 
-```text
-브라우저 ──▶ Cloudflare Worker ──▶ YouTube Data API v3
-                       │
-                       ├──▶ Edge Cache
-                       └──▶ D1
-                             ▲
-Cron Trigger (15분) ──▶ 스냅샷 수집기
-```
+위 아키텍처는 화면과 API를 하나의 Cloudflare Worker에서 제공하고, 현재 조회는 Edge Cache와 YouTube Data API를 사용합니다. 15분 Cron 수집기는 전체 및 8개 카테고리를 조회해 D1에 스냅샷·순위·수집 상태를 저장합니다.
+
+| 구성 요소 | 역할 |
+| --- | --- |
+| Worker + Static Assets | 반응형 UI 제공 및 `/api/youtube/*` 요청 처리 |
+| Edge Cache | 반복적인 YouTube API 호출 감소 및 응답 속도 개선 |
+| YouTube Data API v3 | 대한민국 현재 인기 영상 원본 데이터 제공 |
+| D1 | 스냅샷·순위·모멘텀·수집 실행 상태 저장 |
+| Cron Trigger | 15분마다 전체 및 8개 카테고리 수집 실행 |
+| Runtime Secret | `YT_API_KEY`를 브라우저 번들 밖에서 안전하게 관리 |
+| Build Variable | 운영 배포에 `DB` binding 생성 |
 
 `YT_API_KEY`만 설정해도 현재 인기 피드는 동작합니다. 예약 수집, 과거 차트, 순위 변화 및 급상승 분석에는 D1 연결이 필요합니다.
 
