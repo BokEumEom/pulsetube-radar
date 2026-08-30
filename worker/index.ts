@@ -13,6 +13,7 @@ import {
   saveSnapshot,
   scopeForCategory,
   startCollectorRun,
+  type TrendRegion,
   type TrendSnapshotVideo,
 } from "./youtube-store";
 
@@ -83,6 +84,18 @@ const FEATURED_CATEGORY_IDS: Set<string> = new Set(
   FEATURED_CATEGORIES.map((category) => category.id),
 );
 
+const REGIONS: ReadonlyArray<{ code: TrendRegion; label: string }> = [
+  { code: "KR", label: "대한민국" },
+  { code: "JP", label: "일본" },
+  { code: "US", label: "미국" },
+];
+const DEFAULT_REGION: TrendRegion = "KR";
+const REGION_CODES = new Set<TrendRegion>(REGIONS.map((region) => region.code));
+const isTrendRegion = (value: string): value is TrendRegion =>
+  REGION_CODES.has(value as TrendRegion);
+const regionLabel = (region: TrendRegion) =>
+  REGIONS.find((item) => item.code === region)?.label ?? region;
+
 const jsonResponse = (body: unknown, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), {
     status,
@@ -104,7 +117,11 @@ const asCount = (value?: string) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-function buildTrendingVideo(item: YouTubeVideoItem, index: number): TrendSnapshotVideo | null {
+function buildTrendingVideo(
+  item: YouTubeVideoItem,
+  index: number,
+  region: TrendRegion,
+): TrendSnapshotVideo | null {
   if (!item.id || !item.snippet) return null;
 
   const views = asCount(item.statistics?.viewCount);
@@ -114,6 +131,7 @@ function buildTrendingVideo(item: YouTubeVideoItem, index: number): TrendSnapsho
     (Date.now() - new Date(publishedAt).getTime()) / 3_600_000,
   );
   const category = CATEGORY_NAMES[item.snippet.categoryId ?? ""] ?? "기타";
+  const market = regionLabel(region);
 
   return {
     id: item.id,
@@ -140,9 +158,9 @@ function buildTrendingVideo(item: YouTubeVideoItem, index: number): TrendSnapsho
       `https://i.ytimg.com/vi/${item.id}/hqdefault.jpg`,
     description:
       compactText(item.snippet.description) ||
-      `${item.snippet.channelTitle ?? "이 채널"}의 현재 대한민국 인기 영상입니다.`,
+      `${item.snippet.channelTitle ?? "이 채널"}의 현재 ${market} 인기 영상입니다.`,
     tags: item.snippet.tags?.slice(0, 3) ?? [category],
-    aiNote: `YouTube Data API의 대한민국 인기 영상 현재 스냅샷 ${index + 1}위입니다.`,
+    aiNote: `YouTube Data API의 ${market} 인기 영상 현재 스냅샷 ${index + 1}위입니다.`,
     history: [{ time: "현재", rank: index + 1, views }],
     publishedAt,
     source: "youtube" as const,
@@ -161,6 +179,7 @@ class YouTubeApiError extends Error {
 
 async function fetchYouTubeTrending(
   env: Env,
+  region: TrendRegion,
   categoryId: string | null,
 ): Promise<TrendSnapshotVideo[]> {
   if (!env.YT_API_KEY) {
@@ -175,7 +194,7 @@ async function fetchYouTubeTrending(
   const apiParams = new URLSearchParams({
     part: "snippet,statistics",
     chart: "mostPopular",
-    regionCode: "KR",
+    regionCode: region,
     maxResults: "25",
     key: env.YT_API_KEY,
   });
@@ -196,7 +215,7 @@ async function fetchYouTubeTrending(
 
   const data = (await upstream.json()) as YouTubeVideosResponse;
   const videos = (data.items ?? [])
-    .map(buildTrendingVideo)
+    .map((item, index) => buildTrendingVideo(item, index, region))
     .filter((video): video is TrendSnapshotVideo => Boolean(video));
 
   if (!videos.length) {
@@ -210,9 +229,13 @@ async function fetchYouTubeTrending(
   return videos;
 }
 
-async function collectScope(env: Env, categoryId: string | null) {
+async function collectScope(
+  env: Env,
+  region: TrendRegion,
+  categoryId: string | null,
+) {
   const capturedAtSeconds = Math.floor(Date.now() / 1000);
-  const videos = await fetchYouTubeTrending(env, categoryId);
+  const videos = await fetchYouTubeTrending(env, region, categoryId);
 
   if (!env.DB) {
     return {
@@ -225,6 +248,7 @@ async function collectScope(env: Env, categoryId: string | null) {
 
   try {
     const savedVideos = await saveSnapshot(env.DB, {
+      region,
       scope: scopeForCategory(categoryId),
       categoryId,
       capturedAt: capturedAtSeconds,
@@ -248,6 +272,7 @@ async function collectScope(env: Env, categoryId: string | null) {
 }
 
 const trendingResponse = (
+  region: TrendRegion,
   categoryId: string | null,
   capturedAt: string,
   videos: TrendSnapshotVideo[],
@@ -256,7 +281,7 @@ const trendingResponse = (
   jsonResponse(
     {
       source: "youtube",
-      region: "KR",
+      region,
       category: categoryId
         ? { id: categoryId, label: CATEGORY_NAMES[categoryId] ?? "기타" }
         : null,
@@ -277,6 +302,18 @@ async function handleYouTubeTrending(
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
   const categoryId = requestUrl.searchParams.get("category");
+  const regionValue = requestUrl.searchParams.get("region") ?? DEFAULT_REGION;
+  if (!isTrendRegion(regionValue)) {
+    return jsonResponse(
+      {
+        error: "지원하지 않는 YouTube 국가입니다.",
+        code: "invalid_region",
+      },
+      400,
+      { "Cache-Control": "no-store" },
+    );
+  }
+  const region = regionValue;
   if (categoryId && !FEATURED_CATEGORY_IDS.has(categoryId)) {
     return jsonResponse(
       {
@@ -289,9 +326,9 @@ async function handleYouTubeTrending(
   }
 
   const cacheUrl = new URL(request.url);
-  cacheUrl.search = categoryId
-    ? new URLSearchParams({ category: categoryId }).toString()
-    : "";
+  const cacheParams = new URLSearchParams({ region });
+  if (categoryId) cacheParams.set("category", categoryId);
+  cacheUrl.search = cacheParams.toString();
   const cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
@@ -300,9 +337,10 @@ async function handleYouTubeTrending(
   const scope = scopeForCategory(categoryId);
   if (env.DB) {
     try {
-      const stored = await readLatestSnapshot(env.DB, scope);
+      const stored = await readLatestSnapshot(env.DB, region, scope);
       if (stored) {
         const response = trendingResponse(
+          region,
           categoryId,
           stored.capturedAt,
           stored.videos,
@@ -318,7 +356,7 @@ async function handleYouTubeTrending(
 
   let collected: Awaited<ReturnType<typeof collectScope>>;
   try {
-    collected = await collectScope(env, categoryId);
+    collected = await collectScope(env, region, categoryId);
   } catch (error) {
     if (error instanceof YouTubeApiError) {
       return jsonResponse(
@@ -336,6 +374,7 @@ async function handleYouTubeTrending(
   }
 
   const response = trendingResponse(
+    region,
     categoryId,
     collected.capturedAt,
     collected.videos,
@@ -362,6 +401,14 @@ const storageUnavailable = () =>
   );
 
 class RequestValidationError extends Error {}
+
+const requestedRegion = (url: URL): TrendRegion => {
+  const value = url.searchParams.get("region") ?? DEFAULT_REGION;
+  if (!isTrendRegion(value)) {
+    throw new RequestValidationError("지원하지 않는 YouTube 국가입니다.");
+  }
+  return value;
+};
 
 async function handleStorageRequest(
   request: Request,
@@ -434,10 +481,12 @@ const worker = {
           throw new RequestValidationError("올바른 YouTube videoId가 필요합니다.");
         }
         const hours = requestedHours(requestUrl);
+        const region = requestedRegion(requestUrl);
         return {
+          region,
           videoId,
           hours,
-          points: await readVideoHistory(db, videoId, hours),
+          points: await readVideoHistory(db, region, videoId, hours),
         };
       });
     }
@@ -445,9 +494,11 @@ const worker = {
     if (url.pathname === "/api/youtube/category-trends") {
       return handleStorageRequest(request, env, async (db, requestUrl) => {
         const hours = requestedHours(requestUrl);
+        const region = requestedRegion(requestUrl);
         return {
+          region,
           hours,
-          points: await readCategoryTrends(db, hours),
+          points: await readCategoryTrends(db, region, hours),
         };
       });
     }
@@ -455,15 +506,20 @@ const worker = {
     if (url.pathname === "/api/youtube/churn") {
       return handleStorageRequest(request, env, async (db, requestUrl) => {
         const hours = requestedHours(requestUrl);
+        const region = requestedRegion(requestUrl);
         return {
+          region,
           hours,
-          points: await readChurn(db, hours),
+          points: await readChurn(db, region, hours),
         };
       });
     }
 
     if (url.pathname === "/api/youtube/storage-status") {
-      return handleStorageRequest(request, env, async (db) => readStorageStatus(db));
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const region = requestedRegion(requestUrl);
+        return { region, ...(await readStorageStatus(db, region)) };
+      });
     }
 
     if (url.pathname === "/api/youtube/collector-status") {
@@ -478,8 +534,16 @@ const worker = {
           { Allow: "GET", "Cache-Control": "no-store" },
         );
       }
+      const regionValue = url.searchParams.get("region") ?? DEFAULT_REGION;
+      if (!isTrendRegion(regionValue)) {
+        return jsonResponse(
+          { error: "지원하지 않는 YouTube 국가입니다.", code: "invalid_region" },
+          400,
+          { "Cache-Control": "no-store" },
+        );
+      }
       return jsonResponse(
-        { region: "KR", categories: FEATURED_CATEGORIES },
+        { region: regionValue, regions: REGIONS, categories: FEATURED_CATEGORIES },
         200,
         { "Cache-Control": "public, max-age=86400" },
       );
@@ -511,30 +575,35 @@ const worker = {
         null,
         ...FEATURED_CATEGORIES.map((category) => category.id),
       ];
+      const collectionJobs = REGIONS.flatMap((region) =>
+        categoryIds.map((categoryId) => ({ region: region.code, categoryId })),
+      );
       let runId: string | null = null;
       try {
         runId = await startCollectorRun(env.DB!, {
           trigger: "cron",
-          scopesTotal: categoryIds.length,
+          scopesTotal: collectionJobs.length,
         });
       } catch (error) {
         console.error("Collector run log could not be started", error);
       }
 
       const results = await Promise.allSettled(
-        categoryIds.map((categoryId) => collectScope(env, categoryId)),
+        collectionJobs.map((job) => collectScope(env, job.region, job.categoryId)),
       );
       let scopesSucceeded = 0;
       let videosCollected = 0;
       const errors: string[] = [];
       results.forEach((result, index) => {
+        const job = collectionJobs[index];
+        const scopeLabel = `${job.region}/${job.categoryId ?? "all"}`;
         if (result.status === "rejected") {
           const message = result.reason instanceof Error
             ? result.reason.message
             : String(result.reason);
-          errors.push(`${categoryIds[index] ?? "all"}: ${message}`);
+          errors.push(`${scopeLabel}: ${message}`);
           console.error(
-            `Scheduled YouTube collection failed for ${categoryIds[index] ?? "all"}`,
+            `Scheduled YouTube collection failed for ${scopeLabel}`,
             result.reason,
           );
         } else if (result.value.stored) {
@@ -542,12 +611,12 @@ const worker = {
           videosCollected += result.value.videos.length;
         } else {
           errors.push(
-            `${categoryIds[index] ?? "all"}: ${result.value.storageError ?? "snapshot not stored"}`,
+            `${scopeLabel}: ${result.value.storageError ?? "snapshot not stored"}`,
           );
         }
       });
 
-      const status = scopesSucceeded === categoryIds.length
+      const status = scopesSucceeded === collectionJobs.length
         ? "success"
         : scopesSucceeded > 0
           ? "partial"
@@ -558,7 +627,7 @@ const worker = {
             status,
             scopesSucceeded,
             videosCollected,
-            quotaUnits: categoryIds.length,
+            quotaUnits: collectionJobs.length,
             errorSummary: errors.length ? errors.join(" | ").slice(0, 1000) : null,
           });
         } catch (error) {
