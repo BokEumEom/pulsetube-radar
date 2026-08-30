@@ -1,12 +1,12 @@
 # AWS 없이 운영하는 PulseTube Radar
 
-현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현했습니다. Cloudflare Worker의 `/api/youtube/trending`이 YouTube Data API v3에서 대한민국 인기 영상 25개를 서버 측으로 조회하며 15분 엣지 캐시를 적용합니다. 운영 화면에는 샘플 데이터를 섞지 않으며, D1이 연결되면 예약 수집과 시계열 분석이 함께 활성화됩니다.
+현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현했습니다. Cloudflare Worker의 `/api/youtube/trending`이 YouTube Data API v3에서 대한민국·일본·미국 중 선택한 국가의 인기 영상 25개를 서버 측으로 조회하며 15분 엣지 캐시를 적용합니다. 운영 화면에는 샘플 데이터를 섞지 않으며, D1이 연결되면 예약 수집과 시계열 분석이 함께 활성화됩니다.
 
 현재 구현된 범위:
 
 - `YT_API_KEY` Worker Runtime Secret
-- `videos.list(chart=mostPopular, regionCode=KR)` 서버 측 호출
-- 고정 8개 분야의 `videoCategoryId`별 조회와 카테고리별 캐시
+- `videos.list(chart=mostPopular, regionCode=KR|JP|US)` 서버 측 호출과 국가 전환
+- 3개국 전체 및 고정 8개 분야의 `videoCategoryId`별 조회와 국가·카테고리별 캐시
 - 60초 클라이언트 자동 확인
 - 현재 순위·누적 조회수·좋아요·게시 이후 평균 조회 속도
 - 현재 스냅샷의 카테고리 점유율
@@ -59,6 +59,8 @@ drizzle/
 - Cron: `*/15 * * * *`
 - 동일 15분 구간 중복 수집을 막는 `UNIQUE(region, scope, captured_bucket)` 제약
 - 현재 API 응답 `Cache-Control: public, max-age=300, s-maxage=900, stale-while-revalidate=3600`
+- 예약 수집 범위: 3개국 × (전체 + 8개 카테고리) = 15분마다 27회 요청
+- 예상 수집량: 회당 27 quota units, 하루 약 2,592 units(96회 예약 실행 기준)
 
 ## Cloudflare Git 배포에서 D1 활성화
 
@@ -82,14 +84,14 @@ drizzle/
 4. 기존 `YT_API_KEY`는 **Runtime variables and secrets**의 Secret으로 유지합니다. 빌드 변수로 옮기지 않습니다.
 5. 다시 배포하면 생성 Wrangler 설정에 `DB` binding과 15분 Cron Trigger가 포함됩니다.
 
-첫 배포 직후에는 비교 기준점 하나만 있으므로 순위 변화가 `–`로 보입니다. 약 15분 뒤 두 번째 수집부터 변화량·신규 진입·진입/이탈 차트가 채워지고, 세 번째 수집부터 가속도와 급상승 판정이 활성화됩니다.
+각 국가의 첫 수집 직후에는 비교 기준점 하나만 있으므로 순위 변화가 `–`로 보입니다. 약 15분 뒤 두 번째 수집부터 변화량·신규 진입·진입/이탈 차트가 채워지고, 세 번째 수집부터 가속도와 급상승 판정이 활성화됩니다.
 
 분석 API:
 
-- `GET /api/youtube/history?videoId=...&hours=168`
-- `GET /api/youtube/category-trends?hours=168`
-- `GET /api/youtube/churn?hours=168`
-- `GET /api/youtube/storage-status`
+- `GET /api/youtube/history?region=KR&videoId=...&hours=168`
+- `GET /api/youtube/category-trends?region=JP&hours=168`
+- `GET /api/youtube/churn?region=US&hours=168`
+- `GET /api/youtube/storage-status?region=KR`
 - `GET /api/youtube/collector-status`
 
 ## 대안: Vercel + Postgres
@@ -126,13 +128,13 @@ youtube_collector_runs
 
 ## 시간별 수집 순서
 
-1. `videos.list(chart=mostPopular, regionCode=KR, maxResults=25)` 호출
-2. 고정 8개 카테고리 범위 추가 호출
-3. 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수와 가속도 계산
-4. 동일 수집 모집단의 속도·가속도 백분위로 급상승 신호 판정
-5. snapshot + ranking을 한 트랜잭션으로 저장하고 수집 실행 상태 기록
-6. `/api/youtube/trending`은 최근 D1 스냅샷을 우선 사용하고 엣지 캐시
-7. 30일을 넘긴 원시 스냅샷과 수집 실행 로그를 자동 정리
+1. 대한민국(`KR`)·일본(`JP`)·미국(`US`)을 순회합니다.
+2. 국가마다 `videos.list(chart=mostPopular, maxResults=25)` 전체 범위와 고정 8개 카테고리를 호출합니다.
+3. 동일 국가의 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수와 가속도를 계산합니다.
+4. 동일 국가·수집 범위 모집단의 속도·가속도 백분위로 급상승 신호를 판정합니다.
+5. 국가별 snapshot + ranking을 한 트랜잭션으로 저장하고 수집 실행 상태를 기록합니다.
+6. `/api/youtube/trending`은 요청 국가의 최근 D1 스냅샷을 우선 사용하고 국가별 엣지 캐시를 적용합니다.
+7. 30일을 넘긴 원시 스냅샷과 수집 실행 로그를 자동 정리합니다.
 
 ## 선택 기준
 
