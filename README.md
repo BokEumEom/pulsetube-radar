@@ -1,50 +1,197 @@
 # PulseTube Radar
 
-YouTube 인기 영상의 **순위, 상승 속도, 신규 진입, 카테고리 점유율**을 한 화면에서 탐색하는 트렌드 레이더입니다.
+![Version](https://img.shields.io/badge/version-0.1.0-16a34a)
+![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20D1-F38020?logo=cloudflare&logoColor=white)
+[![English](https://img.shields.io/badge/lang-English-blue)](#english)
+[![한국어](https://img.shields.io/badge/lang-한국어-red)](#한국어)
 
-## 주요 기능
+A serverless radar for discovering what is trending on YouTube Korea — live rankings, category signals, rank movement, and view momentum.
 
-- YouTube Data API 기반 대한민국 현재 인기 영상 피드
-- TOP 10, 실제 수집 구간 조회 속도, 최근 공개 메뉴
-- 3개 스냅샷 기반 조회 가속도·급상승 신호와 모멘텀 점수
-- 예약 수집 성공/부분 성공/실패, 범위·영상 수·API 사용량 상태
-- 고정 8개 분야 메뉴와 카테고리별 실시간 API 조회
-- 현재 인기 영상에서 파생한 인기 채널 스트립
-- 실데이터 연결 실패 시 오류와 재시도 안내(운영 샘플 폴백 없음)
-- D1 기반 24시간·7일·30일 영상 시계열
-- 카테고리 점유율 변화와 인기 목록 진입·이탈
-- 60초 자동 확인과 10종 컬러 테마
-- 데스크톱·모바일 반응형 UI
+YouTube 대한민국 인기 영상의 현재 순위부터 카테고리 흐름, 순위 변동, 조회 모멘텀까지 탐색하는 서버리스 트렌드 레이더입니다.
 
-Cloudflare Worker의 `YT_API_KEY` Secret이 설정되면 `/api/youtube/trending`이 대한민국 인기 영상 25개를 서버에서 조회하고 15분간 엣지 캐시합니다. `category` 파라미터를 사용하면 음악·게임·엔터테인먼트·뉴스/정치·스포츠·영화/애니메이션·과학기술·코미디를 별도로 조회합니다. API 키는 브라우저에 노출되지 않습니다.
+---
 
-`DB` D1 binding이 있으면 Cron Trigger가 15분마다 전체 및 8개 카테고리 스냅샷을 저장합니다. 두 번째 스냅샷부터 직전 순위 변화, 신규 진입, 실제 시간당 조회 증가량이 계산되고 세 번째부터 조회 가속도와 급상승 판정이 활성화됩니다. D1이 없거나 아직 마이그레이션되지 않은 배포에서도 현재 YouTube 라이브 피드는 그대로 동작합니다.
+<a id="english"></a>
 
-## 로컬 실행
+## English
+
+### Overview
+
+PulseTube Radar reads the YouTube Data API v3 from a Cloudflare Worker and presents the latest Korean trending videos in a responsive dashboard. When Cloudflare D1 is connected, a scheduled collector stores snapshots every 15 minutes and turns the live feed into historical trend intelligence.
+
+The project is independently implemented and does not require AWS infrastructure or AI services.
+
+### Highlights
+
+- Live KR `mostPopular` feed with server-side API-key protection
+- Overall ranking and 8 fixed categories: Music, Gaming, Entertainment, News & Politics, Sports, Film & Animation, Science & Technology, and Comedy
+- Rank changes, new entries, exits, and real view growth per hour
+- Momentum, acceleration, population percentile, and breakout signals after enough snapshots
+- 24-hour, 7-day, and 30-day video history with category-share and churn views
+- Collector health, successful scope count, collected video count, and estimated API quota usage
+- 60-second client refresh, edge caching, responsive navigation, and 10 color themes
+- No sample-data fallback in production: upstream failures remain visible and retryable
+
+### Architecture
+
+```text
+Browser ──▶ Cloudflare Worker ──▶ YouTube Data API v3
+                    │
+                    ├──▶ Edge Cache
+                    └──▶ D1
+                          ▲
+Cron Trigger (*/15 * * * *) ──▶ Snapshot Collector
+```
+
+The live feed works with only `YT_API_KEY`. D1 is required for scheduled collection, historical charts, rank deltas, and breakout analysis.
+
+- First snapshot: establishes the baseline
+- Second snapshot (~15 minutes): enables movement and growth metrics
+- Third snapshot (~30 minutes): enables acceleration and breakout signals
+
+### Local development
+
+Requirements: Node.js 22 or later and npm.
 
 ```bash
+git clone https://github.com/BokEumEom/pulsetube-radar.git
+cd pulsetube-radar
 npm ci
 npm run dev
 ```
 
-로컬 실데이터 확인은 Git에 포함하지 않는 `.dev.vars`에 `YT_API_KEY`를 설정합니다.
+For live local data, create an untracked `.dev.vars` file:
 
-## 검증
+```dotenv
+YT_API_KEY=your_youtube_data_api_key
+```
+
+Never commit API keys or paste their real values into documentation.
+
+### Cloudflare deployment
+
+1. Connect this repository to Cloudflare Workers Builds.
+2. Store `YT_API_KEY` under **Runtime variables and secrets** as a secret.
+3. To enable history, create a D1 database named `pulsetube-radar-history`.
+4. Apply the D1 migrations in order:
+
+```bash
+npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0000_sweet_invaders.sql
+npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0001_rich_overlord.sql
+```
+
+5. Add these under **Workers Builds → Build variables and secrets**:
+
+| Variable | Purpose | Required |
+| --- | --- | --- |
+| `D1_DATABASE_ID` | D1 database UUID used to generate the `DB` binding | For history |
+| `D1_DATABASE_NAME` | D1 database name | Optional |
+| `YT_API_KEY` | YouTube Data API v3 key | Runtime secret, not a build variable |
+
+6. Select **Retry build**. A successful production build runs the deploy command with the current build configuration.
+
+The deployed Worker should expose a `DB` binding and the `*/15 * * * *` Cron Trigger when D1 is enabled. See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full deployment and migration guide.
+
+### Useful endpoints
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/youtube/trending` | Latest overall or category feed |
+| `GET /api/youtube/history?videoId=...&hours=168` | Per-video time series |
+| `GET /api/youtube/category-trends?hours=168` | Category-share history |
+| `GET /api/youtube/churn?hours=168` | Entries and exits |
+| `GET /api/youtube/storage-status` | D1 storage state |
+| `GET /api/youtube/collector-status` | Scheduled collector health |
+
+### Validation
 
 ```bash
 npm run lint
 npm run build
+npm test
 ```
 
-## 배포
+---
 
-AWS 없이 운영하는 두 가지 구성을 지원 대상으로 둡니다.
+<a id="한국어"></a>
 
-- 권장: Cloudflare Workers + D1 + Cron Triggers
-- 대안: Vercel Functions + Vercel Cron + Marketplace Postgres
+## 한국어
 
-Cloudflare D1 생성·마이그레이션·Git 빌드 변수 설정은 [DEPLOYMENT.md](./DEPLOYMENT.md)를 참고하세요.
+### 소개
+
+PulseTube Radar는 Cloudflare Worker에서 YouTube Data API v3를 호출해 대한민국 인기 영상을 반응형 대시보드로 제공합니다. Cloudflare D1을 연결하면 15분마다 스냅샷을 저장하여 현재 인기 목록을 순위 변화와 조회 모멘텀을 분석할 수 있는 시계열 데이터로 확장합니다.
+
+AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입니다.
+
+### 주요 기능
+
+- API 키가 브라우저에 노출되지 않는 대한민국 실시간 인기 영상 피드
+- 전체 순위와 음악·게임·엔터테인먼트·뉴스/정치·스포츠·영화/애니메이션·과학기술·코미디 8개 분야
+- 직전 순위 대비 상승·하락, 신규 진입·이탈, 실제 시간당 조회 증가량
+- 충분한 스냅샷이 쌓인 뒤 가속도·백분위·모멘텀·급상승 신호 제공
+- 영상별 24시간·7일·30일 시계열과 카테고리 점유율·진입/이탈 분석
+- 예약 수집 상태, 성공 범위, 수집 영상 수, 예상 API 사용량 확인
+- 60초 자동 갱신, 엣지 캐시, 반응형 탐색 메뉴, 10종 컬러 테마
+- 운영 환경에서 샘플 데이터를 섞지 않고 실제 연동 오류와 재시도 상태 표시
+
+### 동작 구조
+
+```text
+브라우저 ──▶ Cloudflare Worker ──▶ YouTube Data API v3
+                       │
+                       ├──▶ Edge Cache
+                       └──▶ D1
+                             ▲
+Cron Trigger (15분) ──▶ 스냅샷 수집기
+```
+
+`YT_API_KEY`만 설정해도 현재 인기 피드는 동작합니다. 예약 수집, 과거 차트, 순위 변화 및 급상승 분석에는 D1 연결이 필요합니다.
+
+- 첫 번째 스냅샷: 비교 기준 생성
+- 두 번째 스냅샷(약 15분): 순위 변화와 조회 증가량 활성화
+- 세 번째 스냅샷(약 30분): 가속도와 급상승 신호 활성화
+
+### 로컬 실행
+
+Node.js 22 이상이 필요합니다.
+
+```bash
+git clone https://github.com/BokEumEom/pulsetube-radar.git
+cd pulsetube-radar
+npm ci
+npm run dev
+```
+
+로컬 실데이터 확인 시 Git에 포함되지 않는 `.dev.vars`를 생성합니다.
+
+```dotenv
+YT_API_KEY=your_youtube_data_api_key
+```
+
+실제 API 키는 커밋하거나 문서에 기록하지 마세요.
+
+### Cloudflare 배포
+
+- `YT_API_KEY`: **Runtime variables and secrets**의 Secret
+- `D1_DATABASE_ID`: **Workers Builds → Build variables and secrets**
+- `D1_DATABASE_NAME`: 같은 위치의 선택 Build variable
+- D1 binding 이름: `DB`
+- Cron Trigger: `*/15 * * * *`
+
+D1 데이터베이스를 만든 뒤 `drizzle/0000_sweet_invaders.sql`, `drizzle/0001_rich_overlord.sql`을 순서대로 적용하고 **Retry build**를 실행합니다. 상세 절차와 Vercel 대안은 [DEPLOYMENT.md](./DEPLOYMENT.md)를 참고하세요.
+
+### 검증
+
+```bash
+npm run lint
+npm run build
+npm test
+```
 
 ## Reference
 
-제품 구조를 검토할 때 [whchoi98/youtube-trend](https://github.com/whchoi98/youtube-trend)를 참고했으며, 코드와 브랜드는 별도로 구현했습니다.
+The product flow was informed by [whchoi98/youtube-trend](https://github.com/whchoi98/youtube-trend). PulseTube Radar uses its own name, source code, Cloudflare architecture, and feature implementation.
+
+제품 흐름을 검토할 때 위 프로젝트를 참고했으며, 브랜드·소스 코드·Cloudflare 아키텍처·기능 구현은 별도로 구성했습니다.
