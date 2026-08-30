@@ -23,9 +23,17 @@ import {
   type TrendVideo,
 } from "./trend-data";
 
+type TrendRegion = "KR" | "JP" | "US";
+
+const TREND_REGIONS: ReadonlyArray<{ code: TrendRegion; label: string }> = [
+  { code: "KR", label: "대한민국" },
+  { code: "JP", label: "일본" },
+  { code: "US", label: "미국" },
+];
+
 type TrendingApiResponse = {
   source: "youtube";
-  region: "KR";
+  region: TrendRegion;
   capturedAt: string;
   historyEnabled?: boolean;
   category: { id: string; label: string } | null;
@@ -100,8 +108,14 @@ const formatRelativeTime = (value: string | null) => {
   return hours < 24 ? `${hours}시간 전` : `${Math.floor(hours / 24)}일 전`;
 };
 
-async function requestTrendingVideos(categoryId?: string, signal?: AbortSignal): Promise<TrendingApiResponse> {
-  const search = categoryId ? `?${new URLSearchParams({ category: categoryId })}` : "";
+async function requestTrendingVideos(
+  region: TrendRegion,
+  categoryId?: string,
+  signal?: AbortSignal,
+): Promise<TrendingApiResponse> {
+  const params = new URLSearchParams({ region });
+  if (categoryId) params.set("category", categoryId);
+  const search = `?${params}`;
   const response = await fetch(`/api/youtube/trending${search}`, { signal, cache: "no-store" });
   let body: TrendingApiResponse & { error?: string; code?: string };
   try {
@@ -229,14 +243,18 @@ function ChannelStrip({ videos, onSelect }: {
   </section>;
 }
 
-function Hero({ video, isSelection, onClear, scopeLabel }: {
-  video: TrendVideo; isSelection: boolean; onClear: () => void; scopeLabel?: string;
+function Hero({ video, isSelection, onClear, scopeLabel, regionLabel }: {
+  video: TrendVideo;
+  isSelection: boolean;
+  onClear: () => void;
+  scopeLabel?: string;
+  regionLabel: string;
 }) {
   return <section className="hero">
     <img className="hero-image" src={`https://i.ytimg.com/vi/${video.id}/maxresdefault.jpg`} alt="" />
     <div className="hero-wash" />
     <div className="hero-copy">
-      <div className="eyebrow"><span>{isSelection ? `현재 ${video.rank}위` : scopeLabel ? `${scopeLabel} 1위` : "지금 한국 1위"}</span>
+      <div className="eyebrow"><span>{isSelection ? `현재 ${video.rank}위` : scopeLabel ? `${scopeLabel} 1위` : `지금 ${regionLabel} 1위`}</span>
         <span className="category-chip">{video.category}</span>{video.isNew && <span className="new-chip">오늘 첫 진입</span>}<BreakoutBadge video={video}/>
       </div>
       <h1>{video.title}</h1><p>{video.description}</p>
@@ -251,18 +269,19 @@ function Hero({ video, isSelection, onClear, scopeLabel }: {
   </section>;
 }
 
-function DataUnavailableHero({ loading, error, refreshing, onRetry }: {
+function DataUnavailableHero({ loading, error, refreshing, onRetry, regionLabel }: {
   loading: boolean;
   error: string | null;
   refreshing: boolean;
   onRetry: () => void;
+  regionLabel: string;
 }) {
   return <section className="hero empty-hero">
     <div className="empty-hero-copy">
       <span className="empty-icon">{loading ? <RefreshCw className="spin"/> : <AlertTriangle/>}</span>
       <div><span className="dialog-kicker">YOUTUBE LIVE DATA</span>
         <h1>{loading ? "실시간 인기 영상을 연결하는 중" : "실데이터를 불러오지 못했습니다"}</h1>
-        <p>{loading ? "대한민국 인기 영상과 수집 상태를 확인하고 있습니다." : error ?? "YouTube API와 Cloudflare 런타임 설정을 확인해 주세요."}</p>
+        <p>{loading ? `${regionLabel} 인기 영상과 수집 상태를 확인하고 있습니다.` : error ?? "YouTube API와 Cloudflare 런타임 설정을 확인해 주세요."}</p>
         {!loading && <button className="primary-action" onClick={onRetry} disabled={refreshing}><RefreshCw className={refreshing ? "spin" : ""}/>{refreshing ? "다시 확인 중" : "다시 확인"}</button>}
       </div>
     </div>
@@ -287,13 +306,15 @@ function CollectorStatusCard({ status, state }: {
   </div>;
 }
 
-function HistoryPanel({ video, hours = 168, periodLabel = "7일" }: {
+function HistoryPanel({ video, region, hours = 168, periodLabel = "7일" }: {
   video: TrendVideo;
+  region: TrendRegion;
   hours?: number;
   periodLabel?: string;
 }) {
   type HistoryState = "loading" | "ready" | "collecting" | "unavailable";
   const [historyResult, setHistoryResult] = useState<{
+    region: TrendRegion;
     videoId: string;
     hours: number;
     points: HistoryPoint[];
@@ -305,10 +326,11 @@ function HistoryPanel({ video, hours = 168, periodLabel = "7일" }: {
 
     const controller = new AbortController();
     void requestAnalytics<{ points: HistoryPoint[] }>(
-      `/api/youtube/history?${new URLSearchParams({ videoId: video.id, hours: String(hours) })}`,
+      `/api/youtube/history?${new URLSearchParams({ region, videoId: video.id, hours: String(hours) })}`,
       controller.signal,
     ).then((body) => {
       setHistoryResult({
+        region,
         videoId: video.id,
         hours,
         points: body.points,
@@ -316,13 +338,15 @@ function HistoryPanel({ video, hours = 168, periodLabel = "7일" }: {
       });
     }).catch((error) => {
       if (error instanceof DOMException && error.name === "AbortError") return;
-      setHistoryResult({ videoId: video.id, hours, points: [], state: "unavailable" });
+      setHistoryResult({ region, videoId: video.id, hours, points: [], state: "unavailable" });
     });
 
     return () => controller.abort();
-  }, [hours, video.id, video.source]);
+  }, [hours, region, video.id, video.source]);
 
-  const currentResult = historyResult?.videoId === video.id && historyResult.hours === hours
+  const currentResult = historyResult?.region === region
+    && historyResult.videoId === video.id
+    && historyResult.hours === hours
     ? historyResult
     : null;
   const historyState: HistoryState = video.source !== "youtube"
@@ -373,7 +397,7 @@ function HistoryPanel({ video, hours = 168, periodLabel = "7일" }: {
   </section>;
 }
 
-function SeriesView({ videos }: { videos: TrendVideo[] }) {
+function SeriesView({ videos, region }: { videos: TrendVideo[]; region: TrendRegion }) {
   const [videoId, setVideoId] = useState(videos[0]?.id ?? "");
   const [period, setPeriod] = useState("7일");
   const video = videos.find((item) => item.id === videoId) ?? videos[0];
@@ -389,7 +413,7 @@ function SeriesView({ videos }: { videos: TrendVideo[] }) {
       </select></label>
       <div className="periods">{["24시간","7일","30일"].map((item) => <button key={item} className={period === item ? "active" : ""} onClick={() => setPeriod(item)}>{item}</button>)}</div>
     </section>
-    <HistoryPanel video={video} hours={periodHours[period]} periodLabel={period}/>
+    <HistoryPanel video={video} region={region} hours={periodHours[period]} periodLabel={period}/>
     <section className="signal-table"><div className="section-head"><div><span>VELOCITY</span><h2>상승 속도 비교</h2></div></div>
       <div className="table-head"><span>영상</span><span>현재 순위</span><span>시간당 조회</span><span>가속 신호</span></div>
       {videos.slice(0,6).map((item) => <button key={item.id} onClick={() => setVideoId(item.id)}>
@@ -399,7 +423,12 @@ function SeriesView({ videos }: { videos: TrendVideo[] }) {
   </main>;
 }
 
-function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }) {
+function ShareView({ videos, isLive, region, regionLabel }: {
+  videos: TrendVideo[];
+  isLive: boolean;
+  region: TrendRegion;
+  regionLabel: string;
+}) {
   const [briefType, setBriefType] = useState("today");
   const [categoryHistory, setCategoryHistory] = useState<CategoryTrendPoint[]>([]);
   const [churnHistory, setChurnHistory] = useState<ChurnPoint[]>([]);
@@ -412,10 +441,11 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
     if (!isLive) return;
     const controller = new AbortController();
     const hours = 168;
+    const params = new URLSearchParams({ region, hours: String(hours) });
     void Promise.all([
-      requestAnalytics<{ points: CategoryTrendPoint[] }>(`/api/youtube/category-trends?hours=${hours}`, controller.signal),
-      requestAnalytics<{ points: ChurnPoint[] }>(`/api/youtube/churn?hours=${hours}`, controller.signal),
-      requestAnalytics<StorageStatus>("/api/youtube/storage-status", controller.signal),
+      requestAnalytics<{ points: CategoryTrendPoint[] }>(`/api/youtube/category-trends?${params}`, controller.signal),
+      requestAnalytics<{ points: ChurnPoint[] }>(`/api/youtube/churn?${params}`, controller.signal),
+      requestAnalytics<StorageStatus>(`/api/youtube/storage-status?${new URLSearchParams({ region })}`, controller.signal),
     ]).then(([categoryBody, churnBody, status]) => {
       setCategoryHistory(categoryBody.points);
       setChurnHistory(churnBody.points);
@@ -426,7 +456,7 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
       setAnalyticsState("unavailable");
     });
     return () => controller.abort();
-  }, [isLive]);
+  }, [isLive, region]);
 
   if (!videos.length) {
     return <EmptyAnalyticsView title="점유율 · 리포트" description="실시간 인기 영상이 연결되면 카테고리 점유율과 진입·이탈을 표시합니다."/>;
@@ -457,7 +487,7 @@ function ShareView({ videos, isLive }: { videos: TrendVideo[]; isLive: boolean }
   const enteredTotal = churnHistory.reduce((sum, point) => sum + point.entered, 0);
   const exitedTotal = churnHistory.reduce((sum, point) => sum + point.exited, 0);
   const briefs: Record<string,string> = {
-    today:`현재 대한민국 인기 영상 ${videos.length}개 중 ${topCategory.category} 분야가 ${topCategory.share}%로 가장 큰 비중을 차지합니다. 이 수치는 YouTube Data API의 현재 스냅샷을 기준으로 합니다.`,
+    today:`현재 ${regionLabel} 인기 영상 ${videos.length}개 중 ${topCategory.category} 분야가 ${topCategory.share}%로 가장 큰 비중을 차지합니다. 이 수치는 YouTube Data API의 현재 스냅샷을 기준으로 합니다.`,
     compare:categoryDelta === null
       ? "비교 가능한 이전 스냅샷이 아직 없습니다. D1 연결 후 두 번째 수집부터 카테고리 변화량이 계산됩니다."
       : `${topCategory.category} 비중은 수집 구간 시작보다 ${Math.abs(categoryDelta)}%p ${categoryDelta > 0 ? "늘었고" : categoryDelta < 0 ? "줄었고" : "변화가 없고"}, 같은 기간 신규 진입 ${enteredTotal}건·이탈 ${exitedTotal}건이 감지됐습니다.`,
@@ -508,6 +538,7 @@ export default function Home() {
   const [liveVideos, setLiveVideos] = useState<TrendVideo[] | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
+  const [region, setRegion] = useState<TrendRegion>("KR");
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
   const [categoryCache, setCategoryCache] = useState<Record<string, TrendVideo[]>>({});
   const [categoryLoading, setCategoryLoading] = useState(false);
@@ -516,15 +547,30 @@ export default function Home() {
   const [collectorState, setCollectorState] = useState<"loading" | "ready" | "unavailable">("loading");
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("yt-trend-theme");
-    if (stored && themes.some((item) => item.id === stored)) {
-      window.setTimeout(() => setTheme(stored), 0);
+    const storedTheme = window.localStorage.getItem("yt-trend-theme");
+    if (storedTheme && themes.some((item) => item.id === storedTheme)) {
+      window.setTimeout(() => setTheme(storedTheme), 0);
     }
+    const storedRegion = window.localStorage.getItem("yt-trend-region");
+    if (storedRegion && TREND_REGIONS.some((item) => item.code === storedRegion)) {
+      window.setTimeout(() => setRegion(storedRegion as TrendRegion), 0);
+    }
+  }, []);
+
+  useEffect(() => {
+    setSelected(null);
+    setFocus(null);
+    setActiveCategoryId(null);
+    setCategoryCache({});
+    setCategoryError(null);
+    setLiveVideos(null);
+    setDataError(null);
+    setDataLoading(true);
 
     const controller = new AbortController();
     const load = async (silent = false) => {
       try {
-        const data = await requestTrendingVideos(undefined, controller.signal);
+        const data = await requestTrendingVideos(region, undefined, controller.signal);
         setLiveVideos(data.videos);
         setUpdatedAt(formatCapturedAt(data.capturedAt));
         setDataError(null);
@@ -559,21 +605,31 @@ export default function Home() {
       controller.abort();
       window.clearInterval(pollId);
     };
-  }, []);
+  }, [region]);
 
   const applyTheme = (next: string) => {
     setTheme(next);
     window.localStorage.setItem("yt-trend-theme", next);
   };
 
+  const selectRegion = (next: TrendRegion) => {
+    if (next === region) return;
+    window.localStorage.setItem("yt-trend-region", next);
+    setRegion(next);
+  };
+
+  const activeRegion = TREND_REGIONS.find((item) => item.code === region) ?? TREND_REGIONS[0];
   const allVideos = useMemo(() => liveVideos ?? [], [liveVideos]);
   const isLive = allVideos.length > 0;
-  const baseRows = useMemo(() => buildLiveRows(allVideos), [allVideos]);
+  const baseRows = useMemo(
+    () => buildLiveRows(allVideos, activeRegion.label),
+    [activeRegion.label, allVideos],
+  );
   const activeCategory = YOUTUBE_CATEGORIES.find((category) => category.id === activeCategoryId) ?? null;
   const categoryVideos = activeCategoryId ? categoryCache[activeCategoryId] : undefined;
   const visibleVideos = activeCategory ? categoryVideos ?? [] : allVideos;
   const categoryRow = activeCategory && categoryVideos
-    ? buildCategoryRow(activeCategory, categoryVideos)
+    ? buildCategoryRow(activeCategory, categoryVideos, activeRegion.label)
     : null;
   const shownRows = categoryRow
     ? [categoryRow]
@@ -615,7 +671,7 @@ export default function Home() {
 
     setCategoryLoading(true);
     try {
-      const data = await requestTrendingVideos(categoryId);
+      const data = await requestTrendingVideos(region, categoryId);
       setCategoryCache((current) => ({ ...current, [categoryId]: data.videos }));
       setUpdatedAt(formatCapturedAt(data.capturedAt));
     } catch (error) {
@@ -628,7 +684,7 @@ export default function Home() {
   const refresh = async () => {
     setRefreshing(true);
     try {
-      const data = await requestTrendingVideos(activeCategoryId ?? undefined);
+      const data = await requestTrendingVideos(region, activeCategoryId ?? undefined);
       if (activeCategoryId) {
         setCategoryCache((current) => ({ ...current, [activeCategoryId]: data.videos }));
         setCategoryError(null);
@@ -680,16 +736,19 @@ export default function Home() {
       <header className="topbar">
         <button className="brand" onClick={showHome} aria-label="홈으로"><span className="brand-mark"><TrendingUp/></span><span><b>PULSETUBE</b><small>RADAR</small></span></button>
         <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
+        <div className="region-switch" aria-label="분석 국가 선택">
+          {TREND_REGIONS.map((item) => <button key={item.code} className={region === item.code ? "active" : ""} onClick={() => selectRegion(item.code)}>{item.label}</button>)}
+        </div>
         <div className={`capture ${latestRun?.status ?? collectorState}`}><span/> {collectorLabel}</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
-        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()}/>} {selected&&<HistoryPanel video={selected}/>}
+        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>} {selected&&<HistoryPanel video={selected} region={region}/>}
         {metricVideos.length>0&&<section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>현재</em></div><div><TrendingUp/><span>{(fastestAcceleration?.sampleCount ?? 1)>=3?"최대 조회 가속":"조회 속도"}</span><b>{(fastestAcceleration?.sampleCount ?? 1)>=3?accelerationText(fastestAcceleration):`${fmt(fastest.velocity)}/시`}</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 범위</span><b>{metricVideos.length}개 영상</b></div></section>}
         <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
           {groups.map((group)=>{const groupRows=baseRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={!activeCategory&&focus===row.id?"active":""} onClick={()=>selectRow(row.id)}>{row.label}</button>)}</Fragment>})}
           <h3>분야</h3>
           {YOUTUBE_CATEGORIES.map((category)=><button key={category.id} className={activeCategoryId===category.id?"active":""} onClick={()=>void selectCategory(category.id)}>{category.label}</button>)}
-          <div className="source-note"><span>{isLive?"LIVE API":dataLoading?"CONNECTING":"LIVE UNAVAILABLE"}</span><p>{isLive?`최근 화면 갱신 ${updatedAt} KST · 60초 자동 확인`:dataLoading?"실시간 인기 영상을 불러오는 중입니다.":dataError??"실데이터 연결을 확인해 주세요."}</p>{dataError&&!isLive&&<AlertTriangle aria-hidden="true"/>}</div>
+          <div className="source-note"><span>{isLive?"LIVE API":dataLoading?"CONNECTING":"LIVE UNAVAILABLE"}</span><p>{isLive?`${activeRegion.label} · 최근 화면 갱신 ${updatedAt} KST · 60초 자동 확인`:dataLoading?"실시간 인기 영상을 불러오는 중입니다.":dataError??"실데이터 연결을 확인해 주세요."}</p>{dataError&&!isLive&&<AlertTriangle aria-hidden="true"/>}</div>
           <CollectorStatusCard status={collectorStatus} state={collectorState}/></aside>
           <main className="rows-area">{(focus||activeCategory)&&<button className="focus-back" onClick={showHome}><ArrowLeft/> 전체 피드로</button>}
             {categoryLoading&&activeCategory&&<div className="scope-state" role="status"><RefreshCw className="spin"/><strong>{activeCategory.label} 인기 영상을 불러오는 중</strong><span>YouTube Data API 카테고리 조회</span></div>}
@@ -699,9 +758,9 @@ export default function Home() {
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
-      <TabsContent value="series" className="tab-content"><SeriesView videos={allVideos}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={allVideos} isLive={isLive}/></TabsContent>
+      <TabsContent value="series" className="tab-content"><SeriesView videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
-    <footer><span>PULSETUBE RADAR</span><p>{isLive?"YouTube Data API v3 · 대한민국 현재 인기 영상 · D1 15분 스냅샷":"실데이터 연결 필요 · 샘플 데이터 미표시"}</p></footer>
+    <footer><span>PULSETUBE RADAR</span><p>{isLive?`YouTube Data API v3 · ${activeRegion.label} 현재 인기 영상 · D1 15분 스냅샷`:"실데이터 연결 필요 · 샘플 데이터 미표시"}</p></footer>
   </div>;
 }
