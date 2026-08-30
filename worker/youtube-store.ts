@@ -1,5 +1,7 @@
 import { scoreTrendSignals, type BreakoutStatus } from "./trend-metrics";
 
+export type TrendRegion = "KR" | "JP" | "US";
+
 export type TrendSnapshotVideo = {
   id: string;
   title: string;
@@ -76,7 +78,6 @@ type CollectorRunRow = {
   error_summary: string | null;
 };
 
-const REGION = "KR";
 const SNAPSHOT_INTERVAL_SECONDS = 15 * 60;
 
 const parseTags = (value: string) => {
@@ -98,7 +99,14 @@ const formatTime = (seconds: number) =>
     hour12: false,
   }).format(new Date(seconds * 1000));
 
-const signalNote = (row: RankingRow) => {
+const REGION_LABELS: Record<TrendRegion, string> = {
+  KR: "대한민국",
+  JP: "일본",
+  US: "미국",
+};
+
+const signalNote = (row: RankingRow, region: TrendRegion) => {
+  const regionLabel = REGION_LABELS[region];
   if (row.breakout_status === "EARLY") {
     return "3회 이상 수집에서 조회 속도와 가속도가 모두 상위 10%인 초기 급상승 신호입니다.";
   }
@@ -112,16 +120,16 @@ const signalNote = (row: RankingRow) => {
     return `조회 속도가 직전 구간보다 시간당 ${row.view_acceleration.toLocaleString("ko-KR")}회 빨라졌습니다.`;
   }
   if (row.delta === null) {
-    return `대한민국 인기 영상 ${row.rank}위로 수집된 첫 비교 기준점입니다.`;
+    return `${regionLabel} 인기 영상 ${row.rank}위로 수집된 첫 비교 기준점입니다.`;
   }
   return row.delta > 0
-    ? `직전 수집보다 ${row.delta}계단 상승한 대한민국 인기 영상입니다.`
+    ? `직전 수집보다 ${row.delta}계단 상승한 ${regionLabel} 인기 영상입니다.`
     : row.delta < 0
-      ? `직전 수집보다 ${Math.abs(row.delta)}계단 하락한 대한민국 인기 영상입니다.`
+      ? `직전 수집보다 ${Math.abs(row.delta)}계단 하락한 ${regionLabel} 인기 영상입니다.`
       : `직전 수집과 같은 ${row.rank}위를 유지하고 있습니다.`;
 };
 
-const toVideo = (row: RankingRow): TrendSnapshotVideo => ({
+const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => ({
   id: row.video_id,
   title: row.title,
   channel: row.channel,
@@ -143,7 +151,7 @@ const toVideo = (row: RankingRow): TrendSnapshotVideo => ({
   thumbnail: row.thumbnail,
   description: row.description,
   tags: parseTags(row.tags_json),
-  aiNote: signalNote(row),
+  aiNote: signalNote(row, region),
   history: [{ time: "현재", rank: row.rank, views: row.views }],
   publishedAt: row.published_at ? new Date(row.published_at * 1000).toISOString() : undefined,
   source: "youtube",
@@ -154,6 +162,7 @@ export const scopeForCategory = (categoryId: string | null) =>
 
 export async function readLatestSnapshot(
   db: D1Database,
+  region: TrendRegion,
   scope: string,
   maxAgeSeconds = 20 * 60,
 ) {
@@ -166,7 +175,7 @@ export async function readLatestSnapshot(
        ORDER BY captured_at DESC
        LIMIT 1`,
     )
-    .bind(REGION, scope, minimumCapturedAt)
+    .bind(region, scope, minimumCapturedAt)
     .first<SnapshotRow>();
   if (!snapshot) return null;
 
@@ -187,13 +196,14 @@ export async function readLatestSnapshot(
 
   return {
     capturedAt: new Date(snapshot.captured_at * 1000).toISOString(),
-    videos: result.results.map(toVideo),
+    videos: result.results.map((row) => toVideo(row, region)),
   };
 }
 
 export async function saveSnapshot(
   db: D1Database,
   input: {
+    region: TrendRegion;
     scope: string;
     categoryId: string | null;
     capturedAt: number;
@@ -201,7 +211,7 @@ export async function saveSnapshot(
   },
 ) {
   const capturedBucket = Math.floor(input.capturedAt / SNAPSHOT_INTERVAL_SECONDS);
-  const snapshotId = `${REGION}:${input.scope}:${capturedBucket}`;
+  const snapshotId = `${input.region}:${input.scope}:${capturedBucket}`;
   const previousSnapshot = await db
     .prepare(
       `SELECT id, captured_at
@@ -210,7 +220,7 @@ export async function saveSnapshot(
        ORDER BY captured_bucket DESC
        LIMIT 1`,
     )
-    .bind(REGION, input.scope, capturedBucket)
+    .bind(input.region, input.scope, capturedBucket)
     .first<SnapshotRow>();
 
   const previousRankings = previousSnapshot
@@ -281,7 +291,7 @@ export async function saveSnapshot(
     )
     .bind(
       snapshotId,
-      REGION,
+      input.region,
       input.scope,
       input.categoryId,
       input.capturedAt,
@@ -357,11 +367,16 @@ export async function saveSnapshot(
   });
 
   await db.batch([snapshotStatement, ...rankingStatements]);
-  const saved = await readLatestSnapshot(db, input.scope);
+  const saved = await readLatestSnapshot(db, input.region, input.scope);
   return saved?.videos ?? input.videos;
 }
 
-export async function readVideoHistory(db: D1Database, videoId: string, hours: number) {
+export async function readVideoHistory(
+  db: D1Database,
+  region: TrendRegion,
+  videoId: string,
+  hours: number,
+) {
   const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
   const result = await db
     .prepare(
@@ -381,7 +396,7 @@ export async function readVideoHistory(db: D1Database, videoId: string, hours: n
        WHERE scope_priority = 1
        ORDER BY captured_at ASC`,
     )
-    .bind(REGION, videoId, minimumCapturedAt)
+    .bind(region, videoId, minimumCapturedAt)
     .all<{
       captured_at: number;
       rank: number;
@@ -410,7 +425,7 @@ const categoryGroup = (categoryName: string) => {
   return "other";
 };
 
-export async function readCategoryTrends(db: D1Database, hours: number) {
+export async function readCategoryTrends(db: D1Database, region: TrendRegion, hours: number) {
   const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
   const result = await db
     .prepare(
@@ -422,7 +437,7 @@ export async function readCategoryTrends(db: D1Database, hours: number) {
        GROUP BY captured_hour, r.category_name
        ORDER BY captured_hour ASC`,
     )
-    .bind(REGION, minimumCapturedAt)
+    .bind(region, minimumCapturedAt)
     .all<{ captured_hour: number; category_name: string; item_count: number }>();
 
   const byHour = new Map<number, Record<string, number>>();
@@ -455,7 +470,7 @@ export async function readCategoryTrends(db: D1Database, hours: number) {
   });
 }
 
-export async function readChurn(db: D1Database, hours: number) {
+export async function readChurn(db: D1Database, region: TrendRegion, hours: number) {
   const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
   const result = await db
     .prepare(
@@ -490,7 +505,7 @@ export async function readChurn(db: D1Database, hours: number) {
        WHERE current.previous_id IS NOT NULL
        ORDER BY current.captured_at ASC`,
     )
-    .bind(REGION, minimumCapturedAt)
+    .bind(region, minimumCapturedAt)
     .all<{ captured_at: number; entered: number; exited: number }>();
 
   return result.results.map((row) => ({
@@ -501,7 +516,7 @@ export async function readChurn(db: D1Database, hours: number) {
   }));
 }
 
-export async function readStorageStatus(db: D1Database) {
+export async function readStorageStatus(db: D1Database, region: TrendRegion) {
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS snapshot_count,
@@ -510,7 +525,7 @@ export async function readStorageStatus(db: D1Database) {
        FROM youtube_snapshots
        WHERE region = ?`,
     )
-    .bind(REGION)
+    .bind(region)
     .first<{
       snapshot_count: number;
       first_captured_at: number | null;
