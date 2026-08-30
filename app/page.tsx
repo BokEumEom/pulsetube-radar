@@ -558,15 +558,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setSelected(null);
-    setFocus(null);
-    setActiveCategoryId(null);
-    setCategoryCache({});
-    setCategoryError(null);
-    setLiveVideos(null);
-    setDataError(null);
-    setDataLoading(true);
-
     const controller = new AbortController();
     const load = async (silent = false) => {
       try {
@@ -615,6 +606,14 @@ export default function Home() {
   const selectRegion = (next: TrendRegion) => {
     if (next === region) return;
     window.localStorage.setItem("yt-trend-region", next);
+    setSelected(null);
+    setFocus(null);
+    setActiveCategoryId(null);
+    setCategoryCache({});
+    setCategoryError(null);
+    setLiveVideos(null);
+    setDataError(null);
+    setDataLoading(true);
     setRegion(next);
   };
 
@@ -758,7 +757,7 @@ export default function Home() {
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
-      <TabsContent value="series" className="tab-content"><SeriesView videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
+      <TabsContent value="series" className="tab-content"><SeriesView key={region} videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView key={region} videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
     <footer><span>PULSETUBE RADAR</span><p>{isLive?`YouTube Data API v3 · ${activeRegion.label} 현재 인기 영상 · D1 15분 스냅샷`:"실데이터 연결 필요 · 샘플 데이터 미표시"}</p></footer>
