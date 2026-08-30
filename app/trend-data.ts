@@ -237,7 +237,10 @@ export const rows: TrendRow[] = [
   { id: "global", group: "국가", label: "글로벌 교차", title: "한국과 글로벌에서 함께 뜨는 영상", videoIds: [videos[1].id, videos[2].id, videos[3].id, videos[4].id, videos[6].id] },
 ];
 
-export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
+export function buildLiveRows(
+  liveVideos: TrendVideo[],
+  regionLabel = "대한민국",
+): TrendRow[] {
   const usesSnapshotVelocity = liveVideos.some(
     (video) => video.velocityKind === "snapshot",
   );
@@ -266,7 +269,7 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
       id: "top",
       group: "랭킹",
       label: "현재 인기",
-      title: "대한민국 인기 영상 TOP 10",
+      title: `${regionLabel} 인기 영상 TOP 10`,
       hint: "YouTube Data API 현재 스냅샷",
       topStyle: true,
       videoIds: top.map((video) => video.id),
@@ -309,7 +312,7 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
       id: "music",
       group: "YouTube Music",
       label: "인기 음악",
-      title: "대한민국 인기 영상 속 음악",
+      title: `${regionLabel} 인기 영상 속 음악`,
       hint: "공식 Music Charts가 아닌 인기 영상 필터",
       videoIds: music.map((video) => video.id),
     });
@@ -339,12 +342,13 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
 export function buildCategoryRow(
   category: YouTubeCategory,
   categoryVideos: TrendVideo[],
+  regionLabel = "대한민국",
 ): TrendRow {
   return {
     id: `category-${category.id}`,
     group: "분야",
     label: category.label,
-    title: category.title,
+    title: `${regionLabel} ${category.label} 인기 영상`,
     hint: "YouTube Data API 카테고리별 현재 인기",
     topStyle: true,
     videoIds: categoryVideos.map((video) => video.id),
