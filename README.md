@@ -7,9 +7,9 @@
 [![English](https://img.shields.io/badge/lang-English-blue)](#english)
 [![한국어](https://img.shields.io/badge/lang-한국어-red)](#한국어)
 
-A serverless radar for discovering what is trending on YouTube Korea — live rankings, category signals, rank movement, and view momentum.
+A serverless radar for discovering what is accelerating on YouTube across Korea, Japan, and the United States — live rankings, category signals, rank movement, and view momentum.
 
-YouTube 대한민국 인기 영상의 현재 순위부터 카테고리 흐름, 순위 변동, 조회 모멘텀까지 탐색하는 서버리스 트렌드 레이더입니다.
+대한민국·일본·미국 YouTube 인기 영상의 현재 순위부터 카테고리 흐름, 순위 변동, 조회 모멘텀까지 탐색하는 서버리스 트렌드 레이더입니다.
 
 ---
 
@@ -19,13 +19,13 @@ YouTube 대한민국 인기 영상의 현재 순위부터 카테고리 흐름, �
 
 ### Overview
 
-PulseTube Radar reads the YouTube Data API v3 from a Cloudflare Worker and presents the latest Korean trending videos in a responsive dashboard. When Cloudflare D1 is connected, a scheduled collector stores snapshots every 15 minutes and turns the live feed into historical trend intelligence.
+PulseTube Radar reads the YouTube Data API v3 from a Cloudflare Worker and presents the latest trending videos for Korea, Japan, and the United States in a responsive dashboard. When Cloudflare D1 is connected, a scheduled collector stores snapshots every 15 minutes and turns the live feed into historical trend intelligence.
 
 The project is independently implemented and does not require AWS infrastructure or AI services.
 
 ### Highlights
 
-- Live KR `mostPopular` feed with server-side API-key protection
+- Live KR, JP, and US `mostPopular` feeds with a persistent country switcher and server-side API-key protection
 - Overall ranking and 8 fixed categories: Music, Gaming, Entertainment, News & Politics, Sports, Film & Animation, Science & Technology, and Comedy
 - Rank changes, new entries, exits, and real view growth per hour
 - Momentum, acceleration, population percentile, and breakout signals after enough snapshots
@@ -44,7 +44,7 @@ flowchart LR
     W -->|"latest snapshot / analytics"| D[("Cloudflare D1<br/>DB binding")]
 
     T["Cron Trigger<br/>*/15 * * * *"] --> S["Scheduled Snapshot Collector"]
-    S -->|"overall + 8 categories"| Y
+    S -->|"3 regions × overall + 8 categories"| Y
     S -->|"snapshots · rankings · run health"| D
     S -->|"prune data older than 30 days"| D
 
@@ -57,9 +57,9 @@ flowchart LR
 | --- | --- |
 | Worker + Static Assets | Serves the responsive UI and handles `/api/youtube/*` requests |
 | Edge Cache | Reduces repeated YouTube API calls and improves response latency |
-| YouTube Data API v3 | Supplies the current KR `mostPopular` feed |
+| YouTube Data API v3 | Supplies the current `mostPopular` feed for the selected KR, JP, or US market |
 | D1 | Stores snapshots, rankings, momentum metrics, and collector runs |
-| Cron Trigger | Runs the overall and 8-category collector every 15 minutes |
+| Cron Trigger | Runs 27 scopes (3 regions × overall and 8 categories) every 15 minutes |
 | Runtime Secret | Keeps `YT_API_KEY` on the server and out of browser bundles |
 | Build Variable | Generates the production `DB` binding without exposing credentials |
 
@@ -116,10 +116,10 @@ The deployed Worker should expose a `DB` binding and the `*/15 * * * *` Cron Tri
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /api/youtube/trending` | Latest overall or category feed |
-| `GET /api/youtube/history?videoId=...&hours=168` | Per-video time series |
-| `GET /api/youtube/category-trends?hours=168` | Category-share history |
-| `GET /api/youtube/churn?hours=168` | Entries and exits |
+| `GET /api/youtube/trending?region=KR` | Latest overall or category feed (`KR`, `JP`, or `US`) |
+| `GET /api/youtube/history?region=KR&videoId=...&hours=168` | Per-video time series for one region |
+| `GET /api/youtube/category-trends?region=KR&hours=168` | Category-share history for one region |
+| `GET /api/youtube/churn?region=KR&hours=168` | Entries and exits for one region |
 | `GET /api/youtube/storage-status` | D1 storage state |
 | `GET /api/youtube/collector-status` | Scheduled collector health |
 
@@ -139,13 +139,13 @@ npm test
 
 ### 소개
 
-PulseTube Radar는 Cloudflare Worker에서 YouTube Data API v3를 호출해 대한민국 인기 영상을 반응형 대시보드로 제공합니다. Cloudflare D1을 연결하면 15분마다 스냅샷을 저장하여 현재 인기 목록을 순위 변화와 조회 모멘텀을 분석할 수 있는 시계열 데이터로 확장합니다.
+PulseTube Radar는 Cloudflare Worker에서 YouTube Data API v3를 호출해 대한민국·일본·미국 인기 영상을 전환 가능한 반응형 대시보드로 제공합니다. Cloudflare D1을 연결하면 15분마다 스냅샷을 저장하여 현재 인기 목록을 순위 변화와 조회 모멘텀을 분석할 수 있는 시계열 데이터로 확장합니다.
 
 AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입니다.
 
 ### 주요 기능
 
-- API 키가 브라우저에 노출되지 않는 대한민국 실시간 인기 영상 피드
+- API 키가 브라우저에 노출되지 않는 대한민국·일본·미국 실시간 인기 영상 피드와 선택 국가 기억
 - 전체 순위와 음악·게임·엔터테인먼트·뉴스/정치·스포츠·영화/애니메이션·과학기술·코미디 8개 분야
 - 직전 순위 대비 상승·하락, 신규 진입·이탈, 실제 시간당 조회 증가량
 - 충분한 스냅샷이 쌓인 뒤 가속도·백분위·모멘텀·급상승 신호 제공
@@ -156,15 +156,15 @@ AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입�
 
 ### 아키텍처 구성
 
-위 아키텍처는 화면과 API를 하나의 Cloudflare Worker에서 제공하고, 현재 조회는 Edge Cache와 YouTube Data API를 사용합니다. 15분 Cron 수집기는 전체 및 8개 카테고리를 조회해 D1에 스냅샷·순위·수집 상태를 저장합니다.
+위 아키텍처는 화면과 API를 하나의 Cloudflare Worker에서 제공하고, 현재 조회는 Edge Cache와 YouTube Data API를 사용합니다. 15분 Cron 수집기는 3개국의 전체 및 8개 카테고리를 조회해 D1에 국가별 스냅샷·순위·수집 상태를 저장합니다.
 
 | 구성 요소 | 역할 |
 | --- | --- |
 | Worker + Static Assets | 반응형 UI 제공 및 `/api/youtube/*` 요청 처리 |
 | Edge Cache | 반복적인 YouTube API 호출 감소 및 응답 속도 개선 |
-| YouTube Data API v3 | 대한민국 현재 인기 영상 원본 데이터 제공 |
+| YouTube Data API v3 | 선택한 대한민국·일본·미국 시장의 현재 인기 영상 원본 데이터 제공 |
 | D1 | 스냅샷·순위·모멘텀·수집 실행 상태 저장 |
-| Cron Trigger | 15분마다 전체 및 8개 카테고리 수집 실행 |
+| Cron Trigger | 15분마다 3개국의 전체 및 8개 카테고리, 총 27개 범위 수집 실행 |
 | Runtime Secret | `YT_API_KEY`를 브라우저 번들 밖에서 안전하게 관리 |
 | Build Variable | 운영 배포에 `DB` binding 생성 |
 
