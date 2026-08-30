@@ -1,3 +1,5 @@
+import { scoreTrendSignals, type BreakoutStatus } from "./trend-metrics";
+
 export type TrendSnapshotVideo = {
   id: string;
   title: string;
@@ -8,6 +10,12 @@ export type TrendSnapshotVideo = {
   likes: number;
   velocity: number;
   velocityKind: "snapshot" | "lifetime";
+  acceleration: number;
+  sampleCount: number;
+  velocityPercentile: number;
+  accelerationPercentile: number;
+  momentumScore: number;
+  breakoutStatus: BreakoutStatus;
   delta: number | null;
   rank: number;
   isNew?: boolean;
@@ -20,10 +28,7 @@ export type TrendSnapshotVideo = {
   source: "youtube";
 };
 
-type SnapshotRow = {
-  id: string;
-  captured_at: number;
-};
+type SnapshotRow = { id: string; captured_at: number };
 
 type RankingRow = {
   video_id: string;
@@ -34,6 +39,12 @@ type RankingRow = {
   views: number;
   likes: number;
   views_per_hour: number;
+  view_acceleration: number;
+  sample_count: number;
+  velocity_percentile: number;
+  acceleration_percentile: number;
+  momentum_score: number;
+  breakout_status: BreakoutStatus;
   title: string;
   channel: string;
   category_id: string | null;
@@ -48,6 +59,21 @@ type PreviousRankingRow = {
   video_id: string;
   rank: number;
   views: number;
+  views_per_hour: number;
+  sample_count: number;
+};
+
+type CollectorRunRow = {
+  id: string;
+  trigger: string;
+  status: string;
+  started_at: number;
+  completed_at: number | null;
+  scopes_total: number;
+  scopes_succeeded: number;
+  videos_collected: number;
+  quota_units: number;
+  error_summary: string | null;
 };
 
 const REGION = "KR";
@@ -72,6 +98,29 @@ const formatTime = (seconds: number) =>
     hour12: false,
   }).format(new Date(seconds * 1000));
 
+const signalNote = (row: RankingRow) => {
+  if (row.breakout_status === "EARLY") {
+    return "3회 이상 수집에서 조회 속도와 가속도가 모두 상위 10%인 초기 급상승 신호입니다.";
+  }
+  if (row.breakout_status === "BREAKOUT") {
+    return "3회 이상 수집에서 조회 속도와 가속도가 모두 상위 20%인 급상승 신호입니다.";
+  }
+  if (row.sample_count < 3) {
+    return `${row.sample_count}회 수집됨 · 가속 급상승 판정은 3번째 스냅샷부터 활성화됩니다.`;
+  }
+  if (row.view_acceleration > 0) {
+    return `조회 속도가 직전 구간보다 시간당 ${row.view_acceleration.toLocaleString("ko-KR")}회 빨라졌습니다.`;
+  }
+  if (row.delta === null) {
+    return `대한민국 인기 영상 ${row.rank}위로 수집된 첫 비교 기준점입니다.`;
+  }
+  return row.delta > 0
+    ? `직전 수집보다 ${row.delta}계단 상승한 대한민국 인기 영상입니다.`
+    : row.delta < 0
+      ? `직전 수집보다 ${Math.abs(row.delta)}계단 하락한 대한민국 인기 영상입니다.`
+      : `직전 수집과 같은 ${row.rank}위를 유지하고 있습니다.`;
+};
+
 const toVideo = (row: RankingRow): TrendSnapshotVideo => ({
   id: row.video_id,
   title: row.title,
@@ -82,20 +131,19 @@ const toVideo = (row: RankingRow): TrendSnapshotVideo => ({
   likes: row.likes,
   velocity: row.views_per_hour,
   velocityKind: row.previous_rank === null ? "lifetime" : "snapshot",
+  acceleration: row.view_acceleration,
+  sampleCount: row.sample_count,
+  velocityPercentile: row.velocity_percentile,
+  accelerationPercentile: row.acceleration_percentile,
+  momentumScore: row.momentum_score,
+  breakoutStatus: row.breakout_status,
   delta: row.delta,
   rank: row.rank,
   isNew: Boolean(row.is_new),
   thumbnail: row.thumbnail,
   description: row.description,
   tags: parseTags(row.tags_json),
-  aiNote:
-    row.delta === null
-      ? `대한민국 인기 영상 ${row.rank}위로 수집된 첫 비교 기준점입니다.`
-      : row.delta > 0
-        ? `직전 수집보다 ${row.delta}계단 상승한 대한민국 인기 영상입니다.`
-        : row.delta < 0
-          ? `직전 수집보다 ${Math.abs(row.delta)}계단 하락한 대한민국 인기 영상입니다.`
-          : `직전 수집과 같은 ${row.rank}위를 유지하고 있습니다.`,
+  aiNote: signalNote(row),
   history: [{ time: "현재", rank: row.rank, views: row.views }],
   publishedAt: row.published_at ? new Date(row.published_at * 1000).toISOString() : undefined,
   source: "youtube",
@@ -120,13 +168,14 @@ export async function readLatestSnapshot(
     )
     .bind(REGION, scope, minimumCapturedAt)
     .first<SnapshotRow>();
-
   if (!snapshot) return null;
 
   const result = await db
     .prepare(
       `SELECT video_id, rank, previous_rank, delta, is_new, views, likes,
-              views_per_hour, title, channel, category_id, category_name,
+              views_per_hour, view_acceleration, sample_count,
+              velocity_percentile, acceleration_percentile, momentum_score,
+              breakout_status, title, channel, category_id, category_name,
               thumbnail, description, tags_json, published_at
        FROM youtube_rankings
        WHERE snapshot_id = ?
@@ -134,7 +183,6 @@ export async function readLatestSnapshot(
     )
     .bind(snapshot.id)
     .all<RankingRow>();
-
   if (!result.results.length) return null;
 
   return {
@@ -168,7 +216,7 @@ export async function saveSnapshot(
   const previousRankings = previousSnapshot
     ? await db
         .prepare(
-          `SELECT video_id, rank, views
+          `SELECT video_id, rank, views, views_per_hour, sample_count
            FROM youtube_rankings
            WHERE snapshot_id = ?`,
         )
@@ -181,6 +229,46 @@ export async function saveSnapshot(
   const elapsedHours = previousSnapshot
     ? Math.max((input.capturedAt - previousSnapshot.captured_at) / 3600, 0.01)
     : null;
+
+  const calculated = input.videos.map((video) => {
+    const previous = previousByVideo.get(video.id);
+    const viewsPerHour = previous && elapsedHours
+      ? Math.max(0, Math.round((video.views - previous.views) / elapsedHours))
+      : video.velocity;
+    const acceleration = previous && previous.sample_count >= 2
+      ? viewsPerHour - previous.views_per_hour
+      : 0;
+    const publishedAt = video.publishedAt
+      ? Math.floor(new Date(video.publishedAt).getTime() / 1000)
+      : null;
+    const ageHours = publishedAt
+      ? Math.max(0, (input.capturedAt - publishedAt) / 3600)
+      : 24 * 365;
+
+    return {
+      video,
+      previous,
+      viewsPerHour,
+      acceleration,
+      sampleCount: previous ? previous.sample_count + 1 : 1,
+      publishedAt,
+      ageHours,
+      relativeGrowth: previous
+        ? Math.max(0, video.views - previous.views) / Math.max(1, previous.views)
+        : 0,
+      likeRate: video.likes / Math.max(1, video.views),
+      freshness: Math.max(0, 1 - ageHours / 72),
+    };
+  });
+  const signals = scoreTrendSignals(calculated.map((item) => ({
+    velocity: item.viewsPerHour,
+    acceleration: item.acceleration,
+    relativeGrowth: item.relativeGrowth,
+    likeRate: item.likeRate,
+    freshness: item.freshness,
+    sampleCount: item.sampleCount,
+    ageHours: item.ageHours,
+  })));
 
   const snapshotStatement = db
     .prepare(
@@ -201,24 +289,21 @@ export async function saveSnapshot(
       input.videos.length,
     );
 
-  const rankingStatements = input.videos.map((video) => {
-    const previous = previousByVideo.get(video.id);
+  const rankingStatements = calculated.map((item, index) => {
+    const { video, previous } = item;
+    const signal = signals[index];
     const delta = previous ? previous.rank - video.rank : null;
     const isNew = Boolean(previousSnapshot && !previous);
-    const viewsPerHour = previous && elapsedHours
-      ? Math.max(0, Math.round((video.views - previous.views) / elapsedHours))
-      : video.velocity;
-    const publishedAt = video.publishedAt
-      ? Math.floor(new Date(video.publishedAt).getTime() / 1000)
-      : null;
 
     return db
       .prepare(
         `INSERT INTO youtube_rankings
            (snapshot_id, video_id, rank, previous_rank, delta, is_new, views,
-            likes, views_per_hour, title, channel, category_id, category_name,
-            thumbnail, description, tags_json, published_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            likes, views_per_hour, previous_views_per_hour, view_acceleration,
+            sample_count, velocity_percentile, acceleration_percentile,
+            momentum_score, breakout_status, title, channel, category_id,
+            category_name, thumbnail, description, tags_json, published_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(snapshot_id, video_id) DO UPDATE SET
            rank = excluded.rank,
            previous_rank = excluded.previous_rank,
@@ -227,6 +312,13 @@ export async function saveSnapshot(
            views = excluded.views,
            likes = excluded.likes,
            views_per_hour = excluded.views_per_hour,
+           previous_views_per_hour = excluded.previous_views_per_hour,
+           view_acceleration = excluded.view_acceleration,
+           sample_count = excluded.sample_count,
+           velocity_percentile = excluded.velocity_percentile,
+           acceleration_percentile = excluded.acceleration_percentile,
+           momentum_score = excluded.momentum_score,
+           breakout_status = excluded.breakout_status,
            title = excluded.title,
            channel = excluded.channel,
            category_id = excluded.category_id,
@@ -245,7 +337,14 @@ export async function saveSnapshot(
         isNew ? 1 : 0,
         video.views,
         video.likes,
-        viewsPerHour,
+        item.viewsPerHour,
+        previous?.views_per_hour ?? 0,
+        item.acceleration,
+        item.sampleCount,
+        signal.velocityPercentile,
+        signal.accelerationPercentile,
+        signal.momentumScore,
+        signal.breakoutStatus,
         video.title,
         video.channel,
         video.categoryId,
@@ -253,26 +352,22 @@ export async function saveSnapshot(
         video.thumbnail,
         video.description,
         JSON.stringify(video.tags),
-        Number.isFinite(publishedAt) ? publishedAt : null,
+        Number.isFinite(item.publishedAt) ? item.publishedAt : null,
       );
   });
 
   await db.batch([snapshotStatement, ...rankingStatements]);
-
   const saved = await readLatestSnapshot(db, input.scope);
   return saved?.videos ?? input.videos;
 }
 
-export async function readVideoHistory(
-  db: D1Database,
-  videoId: string,
-  hours: number,
-) {
+export async function readVideoHistory(db: D1Database, videoId: string, hours: number) {
   const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
   const result = await db
     .prepare(
       `WITH ranked_points AS (
          SELECT s.captured_at, r.rank, r.views, r.likes, r.views_per_hour,
+                r.view_acceleration,
                 ROW_NUMBER() OVER (
                   PARTITION BY s.captured_at
                   ORDER BY CASE WHEN s.scope = 'all' THEN 0 ELSE 1 END
@@ -281,7 +376,7 @@ export async function readVideoHistory(
          JOIN youtube_rankings r ON r.snapshot_id = s.id
          WHERE s.region = ? AND r.video_id = ? AND s.captured_at >= ?
        )
-       SELECT captured_at, rank, views, likes, views_per_hour
+       SELECT captured_at, rank, views, likes, views_per_hour, view_acceleration
        FROM ranked_points
        WHERE scope_priority = 1
        ORDER BY captured_at ASC`,
@@ -293,6 +388,7 @@ export async function readVideoHistory(
       views: number;
       likes: number;
       views_per_hour: number;
+      view_acceleration: number;
     }>();
 
   return result.results.map((row) => ({
@@ -302,14 +398,13 @@ export async function readVideoHistory(
     views: row.views,
     likes: row.likes,
     velocity: row.views_per_hour,
+    acceleration: row.view_acceleration,
   }));
 }
 
 const categoryGroup = (categoryName: string) => {
   if (categoryName === "음악") return "music";
-  if (["엔터테인먼트", "코미디", "영화·애니메이션"].includes(categoryName)) {
-    return "entertainment";
-  }
+  if (["엔터테인먼트", "코미디", "영화·애니메이션"].includes(categoryName)) return "entertainment";
   if (categoryName === "게임") return "game";
   if (["과학기술", "교육"].includes(categoryName)) return "tech";
   return "other";
@@ -320,8 +415,7 @@ export async function readCategoryTrends(db: D1Database, hours: number) {
   const result = await db
     .prepare(
       `SELECT CAST(s.captured_at / 3600 AS INTEGER) * 3600 AS captured_hour,
-              r.category_name,
-              COUNT(*) AS item_count
+              r.category_name, COUNT(*) AS item_count
        FROM youtube_snapshots s
        JOIN youtube_rankings r ON r.snapshot_id = s.id
        WHERE s.region = ? AND s.scope = 'all' AND s.captured_at >= ?
@@ -374,24 +468,19 @@ export async function readChurn(db: D1Database, hours: number) {
          FROM youtube_snapshots
          WHERE region = ? AND scope = 'all' AND captured_at >= ?
        ), hourly AS (
-         SELECT id, captured_at
-         FROM hour_candidates
-         WHERE hour_priority = 1
+         SELECT id, captured_at FROM hour_candidates WHERE hour_priority = 1
        ), ordered AS (
-         SELECT id, captured_at,
-                LAG(id) OVER (ORDER BY captured_at ASC) AS previous_id
+         SELECT id, captured_at, LAG(id) OVER (ORDER BY captured_at ASC) AS previous_id
          FROM hourly
        )
        SELECT current.captured_at,
-              (SELECT COUNT(*)
-               FROM youtube_rankings current_rank
+              (SELECT COUNT(*) FROM youtube_rankings current_rank
                LEFT JOIN youtube_rankings previous_rank
                  ON previous_rank.snapshot_id = current.previous_id
                 AND previous_rank.video_id = current_rank.video_id
                WHERE current_rank.snapshot_id = current.id
                  AND previous_rank.video_id IS NULL) AS entered,
-              (SELECT COUNT(*)
-               FROM youtube_rankings previous_rank
+              (SELECT COUNT(*) FROM youtube_rankings previous_rank
                LEFT JOIN youtube_rankings current_rank
                  ON current_rank.snapshot_id = current.id
                 AND current_rank.video_id = previous_rank.video_id
@@ -431,19 +520,102 @@ export async function readStorageStatus(db: D1Database) {
   return {
     enabled: true,
     snapshotCount: row?.snapshot_count ?? 0,
-    firstCapturedAt: row?.first_captured_at
-      ? new Date(row.first_captured_at * 1000).toISOString()
-      : null,
-    latestCapturedAt: row?.latest_captured_at
-      ? new Date(row.latest_captured_at * 1000).toISOString()
+    firstCapturedAt: row?.first_captured_at ? new Date(row.first_captured_at * 1000).toISOString() : null,
+    latestCapturedAt: row?.latest_captured_at ? new Date(row.latest_captured_at * 1000).toISOString() : null,
+  };
+}
+
+export async function startCollectorRun(
+  db: D1Database,
+  input: { trigger: "cron" | "request"; scopesTotal: number },
+) {
+  const id = crypto.randomUUID();
+  const startedAt = Math.floor(Date.now() / 1000);
+  await db
+    .prepare(
+      `INSERT INTO youtube_collector_runs
+         (id, trigger, status, started_at, scopes_total, scopes_succeeded,
+          videos_collected, quota_units)
+       VALUES (?, ?, 'running', ?, ?, 0, 0, 0)`,
+    )
+    .bind(id, input.trigger, startedAt, input.scopesTotal)
+    .run();
+  return id;
+}
+
+export async function finishCollectorRun(
+  db: D1Database,
+  id: string,
+  input: {
+    status: "success" | "partial" | "failed";
+    scopesSucceeded: number;
+    videosCollected: number;
+    quotaUnits: number;
+    errorSummary: string | null;
+  },
+) {
+  await db
+    .prepare(
+      `UPDATE youtube_collector_runs
+       SET status = ?, completed_at = ?, scopes_succeeded = ?,
+           videos_collected = ?, quota_units = ?, error_summary = ?
+       WHERE id = ?`,
+    )
+    .bind(
+      input.status,
+      Math.floor(Date.now() / 1000),
+      input.scopesSucceeded,
+      input.videosCollected,
+      input.quotaUnits,
+      input.errorSummary,
+      id,
+    )
+    .run();
+}
+
+export async function readCollectorStatus(db: D1Database) {
+  const [latest, lastSuccess] = await Promise.all([
+    db
+      .prepare(
+        `SELECT id, trigger, status, started_at, completed_at, scopes_total,
+                scopes_succeeded, videos_collected, quota_units, error_summary
+         FROM youtube_collector_runs
+         ORDER BY started_at DESC LIMIT 1`,
+      )
+      .first<CollectorRunRow>(),
+    db
+      .prepare(
+        `SELECT completed_at FROM youtube_collector_runs
+         WHERE status = 'success' AND completed_at IS NOT NULL
+         ORDER BY completed_at DESC LIMIT 1`,
+      )
+      .first<{ completed_at: number }>(),
+  ]);
+
+  return {
+    enabled: true,
+    latestRun: latest ? {
+      id: latest.id,
+      trigger: latest.trigger,
+      status: latest.status,
+      startedAt: new Date(latest.started_at * 1000).toISOString(),
+      completedAt: latest.completed_at ? new Date(latest.completed_at * 1000).toISOString() : null,
+      scopesTotal: latest.scopes_total,
+      scopesSucceeded: latest.scopes_succeeded,
+      videosCollected: latest.videos_collected,
+      quotaUnits: latest.quota_units,
+      errorSummary: latest.error_summary,
+    } : null,
+    lastSuccessAt: lastSuccess?.completed_at
+      ? new Date(lastSuccess.completed_at * 1000).toISOString()
       : null,
   };
 }
 
 export async function pruneSnapshots(db: D1Database, retentionDays = 30) {
   const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 24 * 3600;
-  await db
-    .prepare("DELETE FROM youtube_snapshots WHERE captured_at < ?")
-    .bind(cutoff)
-    .run();
+  await db.batch([
+    db.prepare("DELETE FROM youtube_snapshots WHERE captured_at < ?").bind(cutoff),
+    db.prepare("DELETE FROM youtube_collector_runs WHERE started_at < ?").bind(cutoff),
+  ]);
 }

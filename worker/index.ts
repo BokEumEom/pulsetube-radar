@@ -2,14 +2,17 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import {
+  finishCollectorRun,
   pruneSnapshots,
   readCategoryTrends,
   readChurn,
+  readCollectorStatus,
   readLatestSnapshot,
   readStorageStatus,
   readVideoHistory,
   saveSnapshot,
   scopeForCategory,
+  startCollectorRun,
   type TrendSnapshotVideo,
 } from "./youtube-store";
 
@@ -122,6 +125,12 @@ function buildTrendingVideo(item: YouTubeVideoItem, index: number): TrendSnapsho
     likes: asCount(item.statistics?.likeCount),
     velocity: Math.round(views / ageInHours),
     velocityKind: "lifetime" as const,
+    acceleration: 0,
+    sampleCount: 1,
+    velocityPercentile: 0,
+    accelerationPercentile: 0,
+    momentumScore: 0,
+    breakoutStatus: "NONE" as const,
     delta: null,
     rank: index + 1,
     thumbnail:
@@ -209,6 +218,8 @@ async function collectScope(env: Env, categoryId: string | null) {
     return {
       capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
       videos,
+      stored: false,
+      storageError: null,
     };
   }
 
@@ -222,12 +233,16 @@ async function collectScope(env: Env, categoryId: string | null) {
     return {
       capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
       videos: savedVideos,
+      stored: true,
+      storageError: null,
     };
   } catch (error) {
     console.error("D1 snapshot save failed; serving current YouTube data", error);
     return {
       capturedAt: new Date(capturedAtSeconds * 1000).toISOString(),
       videos,
+      stored: false,
+      storageError: error instanceof Error ? error.message : "D1 snapshot save failed",
     };
   }
 }
@@ -324,7 +339,7 @@ async function handleYouTubeTrending(
     categoryId,
     collected.capturedAt,
     collected.videos,
-    Boolean(env.DB),
+    collected.stored,
   );
 
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
@@ -451,6 +466,10 @@ const worker = {
       return handleStorageRequest(request, env, async (db) => readStorageStatus(db));
     }
 
+    if (url.pathname === "/api/youtube/collector-status") {
+      return handleStorageRequest(request, env, async (db) => readCollectorStatus(db));
+    }
+
     if (url.pathname === "/api/youtube/categories") {
       if (request.method !== "GET") {
         return jsonResponse(
@@ -492,18 +511,66 @@ const worker = {
         null,
         ...FEATURED_CATEGORIES.map((category) => category.id),
       ];
+      let runId: string | null = null;
+      try {
+        runId = await startCollectorRun(env.DB!, {
+          trigger: "cron",
+          scopesTotal: categoryIds.length,
+        });
+      } catch (error) {
+        console.error("Collector run log could not be started", error);
+      }
+
       const results = await Promise.allSettled(
         categoryIds.map((categoryId) => collectScope(env, categoryId)),
       );
+      let scopesSucceeded = 0;
+      let videosCollected = 0;
+      const errors: string[] = [];
       results.forEach((result, index) => {
         if (result.status === "rejected") {
+          const message = result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason);
+          errors.push(`${categoryIds[index] ?? "all"}: ${message}`);
           console.error(
             `Scheduled YouTube collection failed for ${categoryIds[index] ?? "all"}`,
             result.reason,
           );
+        } else if (result.value.stored) {
+          scopesSucceeded += 1;
+          videosCollected += result.value.videos.length;
+        } else {
+          errors.push(
+            `${categoryIds[index] ?? "all"}: ${result.value.storageError ?? "snapshot not stored"}`,
+          );
         }
       });
-      await pruneSnapshots(env.DB);
+
+      const status = scopesSucceeded === categoryIds.length
+        ? "success"
+        : scopesSucceeded > 0
+          ? "partial"
+          : "failed";
+      if (runId) {
+        try {
+          await finishCollectorRun(env.DB!, runId, {
+            status,
+            scopesSucceeded,
+            videosCollected,
+            quotaUnits: categoryIds.length,
+            errorSummary: errors.length ? errors.join(" | ").slice(0, 1000) : null,
+          });
+        } catch (error) {
+          console.error("Collector run log could not be completed", error);
+        }
+      }
+
+      try {
+        await pruneSnapshots(env.DB!);
+      } catch (error) {
+        console.error("Snapshot retention cleanup failed", error);
+      }
     })());
   },
 };

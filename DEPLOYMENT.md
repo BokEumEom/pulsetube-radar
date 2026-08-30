@@ -1,6 +1,6 @@
 # AWS 없이 운영하는 PulseTube Radar
 
-현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현했습니다. Cloudflare Worker의 `/api/youtube/trending`이 YouTube Data API v3에서 대한민국 인기 영상 25개를 서버 측으로 조회하며, 15분 엣지 캐시와 샘플 데이터 폴백을 적용합니다. D1이 연결되면 예약 수집과 시계열 분석이 함께 활성화됩니다.
+현재 화면은 원본 프로젝트의 Trend Radar 흐름을 독립적으로 재구현했습니다. Cloudflare Worker의 `/api/youtube/trending`이 YouTube Data API v3에서 대한민국 인기 영상 25개를 서버 측으로 조회하며 15분 엣지 캐시를 적용합니다. 운영 화면에는 샘플 데이터를 섞지 않으며, D1이 연결되면 예약 수집과 시계열 분석이 함께 활성화됩니다.
 
 현재 구현된 범위:
 
@@ -12,6 +12,8 @@
 - 현재 스냅샷의 카테고리 점유율
 - D1 15분 스냅샷과 Cron Trigger
 - 직전 순위 대비 delta, 신규 진입·이탈, 실제 시간당 조회 증가량
+- 세 번째 스냅샷부터 조회 가속도, 모집단 백분위, 모멘텀 점수, 급상승 판정
+- 예약 수집 실행 상태, 성공 범위, 수집 영상 수, 예상 YouTube API 사용량
 - 24시간·7일·30일 영상 시계열과 7일 카테고리 변화
 - 30일 원시 스냅샷 자동 정리
 
@@ -63,10 +65,11 @@ drizzle/
 현재 Git 연동 배포는 D1 없이도 성공하도록 구성되어 있습니다. 시계열을 켜려면 아래 작업을 한 번 수행합니다.
 
 1. Cloudflare Dashboard의 **Storage & Databases → D1 SQL database**에서 `pulsetube-radar-history`를 생성합니다.
-2. 생성한 DB의 Console에서 `drizzle/0000_sweet_invaders.sql`을 실행합니다. CLI를 사용한다면 다음과 같습니다.
+2. 생성한 DB의 Console에서 마이그레이션을 번호 순서대로 실행합니다. 기존 DB는 `0001`만 추가로 적용합니다. CLI를 사용한다면 다음과 같습니다.
 
    ```bash
    npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0000_sweet_invaders.sql
+   npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0001_rich_overlord.sql
    ```
 
 3. Workers Builds의 **Build variables and secrets**에 아래 빌드 변수를 추가합니다.
@@ -79,7 +82,7 @@ drizzle/
 4. 기존 `YT_API_KEY`는 **Runtime variables and secrets**의 Secret으로 유지합니다. 빌드 변수로 옮기지 않습니다.
 5. 다시 배포하면 생성 Wrangler 설정에 `DB` binding과 15분 Cron Trigger가 포함됩니다.
 
-첫 배포 직후에는 비교 기준점 하나만 있으므로 순위 변화가 `–`로 보입니다. 약 15분 뒤 두 번째 수집부터 변화량·신규 진입·진입/이탈 차트가 채워집니다.
+첫 배포 직후에는 비교 기준점 하나만 있으므로 순위 변화가 `–`로 보입니다. 약 15분 뒤 두 번째 수집부터 변화량·신규 진입·진입/이탈 차트가 채워지고, 세 번째 수집부터 가속도와 급상승 판정이 활성화됩니다.
 
 분석 API:
 
@@ -87,6 +90,7 @@ drizzle/
 - `GET /api/youtube/category-trends?hours=168`
 - `GET /api/youtube/churn?hours=168`
 - `GET /api/youtube/storage-status`
+- `GET /api/youtube/collector-status`
 
 ## 대안: Vercel + Postgres
 
@@ -109,18 +113,26 @@ youtube_snapshots
 
 youtube_rankings
   snapshot_id, video_id, rank, previous_rank, delta, is_new,
-  views, likes, views_per_hour, title, channel, category_id,
-  category_name, thumbnail, description, tags_json, published_at
+  views, likes, views_per_hour, previous_views_per_hour,
+  view_acceleration, sample_count, velocity_percentile,
+  acceleration_percentile, momentum_score, breakout_status,
+  title, channel, category_id, category_name, thumbnail,
+  description, tags_json, published_at
+
+youtube_collector_runs
+  id, trigger, status, started_at, completed_at, scopes_total,
+  scopes_succeeded, videos_collected, quota_units, error_summary
 ```
 
 ## 시간별 수집 순서
 
 1. `videos.list(chart=mostPopular, regionCode=KR, maxResults=25)` 호출
 2. 고정 8개 카테고리 범위 추가 호출
-3. 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수 계산
-4. snapshot + ranking을 한 트랜잭션으로 저장
-5. `/api/youtube/trending`은 최근 D1 스냅샷을 우선 사용하고 엣지 캐시
-6. 30일을 넘긴 원시 스냅샷을 자동 정리
+3. 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수와 가속도 계산
+4. 동일 수집 모집단의 속도·가속도 백분위로 급상승 신호 판정
+5. snapshot + ranking을 한 트랜잭션으로 저장하고 수집 실행 상태 기록
+6. `/api/youtube/trending`은 최근 D1 스냅샷을 우선 사용하고 엣지 캐시
+7. 30일을 넘긴 원시 스냅샷과 수집 실행 로그를 자동 정리
 
 ## 선택 기준
 

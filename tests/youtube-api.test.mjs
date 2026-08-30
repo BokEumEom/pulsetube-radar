@@ -44,6 +44,7 @@ test("keeps D1 analytics endpoints explicit when storage is not connected", asyn
     "/api/youtube/category-trends?hours=168",
     "/api/youtube/churn?hours=168",
     "/api/youtube/storage-status",
+    "/api/youtube/collector-status",
   ]) {
     const response = await worker.fetch(
       new Request(`http://localhost${path}`),

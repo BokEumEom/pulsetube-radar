@@ -8,6 +8,12 @@ export type TrendVideo = {
   likes: number;
   velocity: number;
   velocityKind?: "snapshot" | "lifetime";
+  acceleration?: number;
+  sampleCount?: number;
+  velocityPercentile?: number;
+  accelerationPercentile?: number;
+  momentumScore?: number;
+  breakoutStatus?: "NONE" | "BREAKOUT" | "EARLY";
   delta: number | null;
   rank: number;
   isNew?: boolean;
@@ -236,6 +242,9 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
     (video) => video.velocityKind === "snapshot",
   );
   const top = liveVideos.slice(0, 10);
+  const breakouts = [...liveVideos]
+    .filter((video) => video.breakoutStatus && video.breakoutStatus !== "NONE")
+    .sort((a, b) => (b.momentumScore ?? 0) - (a.momentumScore ?? 0));
   const fastest = [...liveVideos]
     .sort((a, b) => b.velocity - a.velocity)
     .slice(0, 10);
@@ -273,6 +282,17 @@ export function buildLiveRows(liveVideos: TrendVideo[]): TrendRow[] {
       videoIds: fastest.map((video) => video.id),
     },
   ];
+
+  if (breakouts.length) {
+    liveRows.splice(1, 0, {
+      id: "breakout",
+      group: "랭킹",
+      label: "가속 급상승",
+      title: "가속도가 확인된 급상승 영상",
+      hint: "3회 이상 수집 · 속도와 가속도 동시 상위권",
+      videoIds: breakouts.map((video) => video.id),
+    });
+  }
 
   if (publishedRecently.length) {
     liveRows.push({
