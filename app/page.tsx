@@ -201,7 +201,6 @@ function VideoTile({ video, index, topStyle, onSelect }: {
       {!topStyle && <span className="rank-chip">{video.rank}</span>}
       <Delta video={video} />
       <BreakoutBadge video={video} />
-      <FormatBadge video={video} compact />
       <span className="play-dot"><Play fill="currentColor" /></span>
     </span>
     <span className="video-copy">
@@ -840,7 +839,7 @@ export default function Home() {
           <main className="rows-area">{(focus||activeCategory)&&<button className="focus-back" onClick={showHome}><ArrowLeft/> 전체 피드로</button>}
             {categoryLoading&&activeCategory&&<div className="scope-state" role="status"><RefreshCw className="spin"/><strong>{activeCategory.label} 인기 영상을 불러오는 중</strong><span>YouTube Data API 카테고리 조회</span></div>}
             {!categoryLoading&&categoryError&&activeCategory&&<div className="scope-state error" role="alert"><AlertTriangle/><strong>{activeCategory.label} 데이터를 불러오지 못했습니다</strong><span>{categoryError}</span><button onClick={()=>void selectCategory(activeCategory.id)}>다시 시도</button></div>}
-            {!categoryLoading&&activeCategory&&categoryVideos&&<CategorySnapshot category={activeCategory} videos={categoryVideos} regionLabel={activeRegion.label}/>}
+            {!categoryLoading&&activeCategory&&activeCategory.id!=="24"&&categoryVideos&&<CategorySnapshot category={activeCategory} videos={categoryVideos} regionLabel={activeRegion.label}/>}
             {!dataLoading&&!activeCategory&&!shownRows.length&&<div className="scope-state" role="status"><Database/><strong>표시할 실시간 영상이 없습니다</strong><span>샘플 데이터 대신 YouTube API 연결 상태를 그대로 표시합니다.</span></div>}
             {!focus&&!activeCategory&&allVideos.length>0&&<ChannelStrip videos={allVideos} onSelect={choose}/>}
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
