@@ -1,4 +1,5 @@
 export type BreakoutStatus = "NONE" | "BREAKOUT" | "EARLY";
+export type TrendVideoFormat = "SHORTS" | "LONG_FORM";
 
 export type TrendSignalInput = {
   velocity: number;
@@ -8,6 +9,7 @@ export type TrendSignalInput = {
   freshness: number;
   sampleCount: number;
   ageHours: number;
+  format: TrendVideoFormat;
 };
 
 export type TrendSignal = {
@@ -15,6 +17,7 @@ export type TrendSignal = {
   accelerationPercentile: number;
   momentumScore: number;
   breakoutStatus: BreakoutStatus;
+  formatPopulationSize: number;
 };
 
 const clamp = (value: number, minimum = 0, maximum = 100) =>
@@ -45,11 +48,32 @@ export function percentileRanks(values: number[]) {
 }
 
 export function scoreTrendSignals(inputs: TrendSignalInput[]): TrendSignal[] {
-  const velocityPercentiles = percentileRanks(inputs.map((input) => input.velocity));
-  const accelerationPercentiles = percentileRanks(inputs.map((input) => input.acceleration));
-  const growthPercentiles = percentileRanks(inputs.map((input) => input.relativeGrowth));
-  const likePercentiles = percentileRanks(inputs.map((input) => input.likeRate));
-  const freshnessPercentiles = percentileRanks(inputs.map((input) => input.freshness));
+  const cohortIndexes = new Map<TrendVideoFormat, number[]>();
+  inputs.forEach((input, index) => {
+    const indexes = cohortIndexes.get(input.format) ?? [];
+    indexes.push(index);
+    cohortIndexes.set(input.format, indexes);
+  });
+
+  const velocityPercentiles = new Array<number>(inputs.length);
+  const accelerationPercentiles = new Array<number>(inputs.length);
+  const growthPercentiles = new Array<number>(inputs.length);
+  const likePercentiles = new Array<number>(inputs.length);
+  const freshnessPercentiles = new Array<number>(inputs.length);
+
+  for (const indexes of cohortIndexes.values()) {
+    const rankMetric = (metric: (input: TrendSignalInput) => number, target: number[]) => {
+      const ranks = percentileRanks(indexes.map((index) => metric(inputs[index])));
+      indexes.forEach((inputIndex, cohortIndex) => {
+        target[inputIndex] = ranks[cohortIndex];
+      });
+    };
+    rankMetric((input) => input.velocity, velocityPercentiles);
+    rankMetric((input) => input.acceleration, accelerationPercentiles);
+    rankMetric((input) => input.relativeGrowth, growthPercentiles);
+    rankMetric((input) => input.likeRate, likePercentiles);
+    rankMetric((input) => input.freshness, freshnessPercentiles);
+  }
 
   return inputs.map((input, index) => {
     const velocityPercentile = velocityPercentiles[index];
@@ -63,7 +87,8 @@ export function scoreTrendSignals(inputs: TrendSignalInput[]): TrendSignal[] {
     ));
 
     let breakoutStatus: BreakoutStatus = "NONE";
-    const enoughEvidence = inputs.length >= 20
+    const formatPopulationSize = cohortIndexes.get(input.format)?.length ?? 0;
+    const enoughEvidence = formatPopulationSize >= 8
       && input.sampleCount >= 3
       && input.velocity > 0
       && input.acceleration > 0;
@@ -91,6 +116,7 @@ export function scoreTrendSignals(inputs: TrendSignalInput[]): TrendSignal[] {
       accelerationPercentile: Math.round(accelerationPercentile * 10) / 10,
       momentumScore,
       breakoutStatus,
+      formatPopulationSize,
     };
   });
 }

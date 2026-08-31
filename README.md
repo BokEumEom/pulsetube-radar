@@ -28,7 +28,8 @@ The project is independently implemented and does not require AWS infrastructure
 - Live KR, JP, and US `mostPopular` feeds with a persistent country switcher and server-side API-key protection
 - Overall ranking and 8 fixed categories: Music, Gaming, Entertainment, News & Politics, Sports, Film & Animation, Science & Technology, and Comedy
 - Rank changes, new entries, exits, and real view growth per hour
-- Momentum, acceleration, population percentile, and breakout signals after enough snapshots
+- Duration collection, duration-based Shorts candidates, format-specific percentiles, and a dedicated Early Signals view
+- Momentum, acceleration, and breakout signals after enough same-format observations
 - 24-hour, 7-day, and 30-day video history with category-share and churn views
 - Collector health, successful scope count, collected video count, and estimated API quota usage
 - 60-second client refresh, edge caching, responsive navigation, and 10 color themes
@@ -98,6 +99,7 @@ Never commit API keys or paste their real values into documentation.
 ```bash
 npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0000_sweet_invaders.sql
 npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0001_rich_overlord.sql
+npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0002_hesitant_songbird.sql
 ```
 
 5. Add these under **Workers Builds → Build variables and secrets**:
@@ -148,7 +150,8 @@ AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입�
 - API 키가 브라우저에 노출되지 않는 대한민국·일본·미국 실시간 인기 영상 피드와 선택 국가 기억
 - 전체 순위와 음악·게임·엔터테인먼트·뉴스/정치·스포츠·영화/애니메이션·과학기술·코미디 8개 분야
 - 직전 순위 대비 상승·하락, 신규 진입·이탈, 실제 시간당 조회 증가량
-- 충분한 스냅샷이 쌓인 뒤 가속도·백분위·모멘텀·급상승 신호 제공
+- 영상 길이 수집, 180초 이하 Shorts 후보 분류, 포맷별 백분위와 전용 Early Signals 화면
+- 같은 포맷의 충분한 스냅샷이 쌓인 뒤 가속도·모멘텀·급상승 신호 제공
 - 영상별 24시간·7일·30일 시계열과 카테고리 점유율·진입/이탈 분석
 - 예약 수집 상태, 성공 범위, 수집 영상 수, 예상 API 사용량 확인
 - 60초 자동 갱신, 엣지 캐시, 반응형 탐색 메뉴, 10종 컬러 테마
@@ -201,7 +204,7 @@ YT_API_KEY=your_youtube_data_api_key
 - D1 binding 이름: `DB`
 - Cron Trigger: `*/15 * * * *`
 
-D1 데이터베이스를 만든 뒤 `drizzle/0000_sweet_invaders.sql`, `drizzle/0001_rich_overlord.sql`을 순서대로 적용하고 **Retry build**를 실행합니다. 상세 절차와 Vercel 대안은 [DEPLOYMENT.md](./DEPLOYMENT.md)를 참고하세요.
+D1 데이터베이스를 만든 뒤 `drizzle/0000_sweet_invaders.sql`, `drizzle/0001_rich_overlord.sql`, `drizzle/0002_hesitant_songbird.sql`을 순서대로 적용하고 **Retry build**를 실행합니다. 기존 DB에는 `0002`만 추가 적용하면 됩니다. 상세 절차와 Vercel 대안은 [DEPLOYMENT.md](./DEPLOYMENT.md)를 참고하세요.
 
 ### 검증
 

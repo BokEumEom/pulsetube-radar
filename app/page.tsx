@@ -160,6 +160,23 @@ const accelerationText = (video: TrendVideo) => {
   return `${acceleration >= 0 ? "+" : "−"}${fmt(Math.abs(acceleration))}/시²`;
 };
 
+const durationText = (seconds = 0) => {
+  if (!seconds) return "길이 확인 중";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+};
+
+function FormatBadge({ video, compact = false }: { video: TrendVideo; compact?: boolean }) {
+  if (!video.videoFormat) return null;
+  return <span className={`video-format-badge ${video.videoFormat === "SHORTS" ? "shorts" : "long"}`}>
+    {video.videoFormat === "SHORTS" ? "SHORTS 후보" : "LONG"}{!compact && ` · ${durationText(video.durationSeconds)}`}
+  </span>;
+}
+
 function BreakoutBadge({ video }: { video: TrendVideo }) {
   if (video.breakoutStatus === "EARLY") return <span className="breakout-badge early">EARLY</span>;
   if (video.breakoutStatus === "BREAKOUT") return <span className="breakout-badge">급상승</span>;
@@ -184,6 +201,7 @@ function VideoTile({ video, index, topStyle, onSelect }: {
       {!topStyle && <span className="rank-chip">{video.rank}</span>}
       <Delta video={video} />
       <BreakoutBadge video={video} />
+      <FormatBadge video={video} compact />
       <span className="play-dot"><Play fill="currentColor" /></span>
     </span>
     <span className="video-copy">
@@ -219,28 +237,95 @@ function ChannelStrip({ videos, onSelect }: {
   onSelect: (video: TrendVideo) => void;
 }) {
   const channels = useMemo(() => {
-    const grouped = new Map<string, { channel: string; views: number; count: number; video: TrendVideo }>();
+    const grouped = new Map<string, { channel: string; velocity: number; count: number; peakScore: number; signals: number; video: TrendVideo }>();
     videos.forEach((video) => {
       const current = grouped.get(video.channel);
       if (current) {
-        current.views += video.views;
+        current.velocity += video.velocity;
         current.count += 1;
+        current.peakScore = Math.max(current.peakScore, video.momentumScore ?? 0);
+        current.signals += video.breakoutStatus && video.breakoutStatus !== "NONE" ? 1 : 0;
+        if ((video.momentumScore ?? 0) > (current.video.momentumScore ?? 0)) current.video = video;
       } else {
-        grouped.set(video.channel, { channel: video.channel, views: video.views, count: 1, video });
+        grouped.set(video.channel, {
+          channel: video.channel,
+          velocity: video.velocity,
+          count: 1,
+          peakScore: video.momentumScore ?? 0,
+          signals: video.breakoutStatus && video.breakoutStatus !== "NONE" ? 1 : 0,
+          video,
+        });
       }
     });
-    return [...grouped.values()].sort((a, b) => b.views - a.views).slice(0, 8);
+    return [...grouped.values()]
+      .sort((a, b) => b.signals - a.signals || b.peakScore - a.peakScore || b.velocity - a.velocity)
+      .slice(0, 8);
   }, [videos]);
 
   return <section className="channel-row" aria-label="지금 뜨는 채널">
-    <div className="row-title"><Users/><h2>지금 뜨는 채널</h2><span>현재 인기 영상 기준</span></div>
+    <div className="row-title"><Users/><h2>지금 뜨는 채널</h2><span>인기 목록 내 조회 속도 · 신호 기준</span></div>
     <div className="channel-strip">
-      {channels.map((item) => <button key={item.channel} onClick={() => onSelect(item.video)}>
-        <img src={item.video.thumbnail} alt="" loading="lazy"/>
-        <span><b>{item.channel}</b><small>조회 {fmt(item.views)} · {item.count}개 영상</small></span>
+      {channels.map((item, index) => <button className="channel-card" key={item.channel} onClick={() => onSelect(item.video)}>
+        <span className="channel-cover"><img src={item.video.thumbnail} alt="" loading="lazy"/><i>#{index + 1}</i></span>
+        <span className="channel-copy"><b>{item.channel}</b><small>{item.count}개 인기 영상 · 합산 +{fmt(item.velocity)}/시</small>
+          <span><em>최고 신호 {item.peakScore}</em>{item.signals > 0 && <strong>{item.signals} SIGNAL</strong>}</span>
+        </span>
       </button>)}
     </div>
   </section>;
+}
+
+function CategorySnapshot({ category, videos, regionLabel }: {
+  category: { id: string; label: string };
+  videos: TrendVideo[];
+  regionLabel: string;
+}) {
+  const shorts = videos.filter((video) => video.videoFormat === "SHORTS").length;
+  const signals = videos.filter((video) => video.breakoutStatus && video.breakoutStatus !== "NONE").length;
+  const fastest = [...videos].sort((a, b) => b.velocity - a.velocity)[0];
+  return <section className="category-snapshot">
+    <div><span>CATEGORY {category.id}</span><h2>{regionLabel} {category.label}는 지금</h2><p>전체 인기 목록의 단순 필터가 아니라 YouTube 카테고리 전용 인기 데이터를 보여줍니다.</p></div>
+    <dl><div><dt>인기 영상</dt><dd>{videos.length}</dd></div><div><dt>Shorts 후보</dt><dd>{shorts}</dd></div><div><dt>급상승 신호</dt><dd>{signals}</dd></div><div><dt>최고 조회 속도</dt><dd>{fastest ? `${fmt(fastest.velocity)}/시` : "—"}</dd></div></dl>
+  </section>;
+}
+
+function EarlySignalsView({ videos, regionLabel, onSelect }: {
+  videos: TrendVideo[];
+  regionLabel: string;
+  onSelect: (video: TrendVideo) => void;
+}) {
+  const [format, setFormat] = useState<"ALL" | "SHORTS" | "LONG_FORM">("ALL");
+  const measured = videos.filter((video) => video.videoFormat);
+  const candidates = [...measured]
+    .filter((video) => format === "ALL" || video.videoFormat === format)
+    .sort((a, b) => {
+      const signalWeight = (value?: TrendVideo["breakoutStatus"]) => value === "EARLY" ? 2 : value === "BREAKOUT" ? 1 : 0;
+      return signalWeight(b.breakoutStatus) - signalWeight(a.breakoutStatus)
+        || (b.momentumScore ?? 0) - (a.momentumScore ?? 0)
+        || (b.accelerationPercentile ?? 0) - (a.accelerationPercentile ?? 0);
+    });
+  const confirmed = candidates.filter((video) => video.breakoutStatus && video.breakoutStatus !== "NONE").length;
+  const observed = candidates.filter((video) => (video.sampleCount ?? 1) >= 3).length;
+  const shorts = measured.filter((video) => video.videoFormat === "SHORTS").length;
+
+  return <main className="subpage early-signals-view">
+    <div className="early-heading"><div><span>FORMAT-AWARE DETECTION</span><h1>Early Signals</h1><p>{regionLabel}에서 이미 뜬 영상보다 지금 가속하기 시작한 영상을 포맷별로 비교합니다.</p></div>
+      <div className="early-summary"><b>{confirmed}</b><span>활성 신호</span><small>{observed}개가 3회 이상 관측됨</small></div>
+    </div>
+    <section className="early-method"><div><strong>영상 길이 수집</strong><span>contentDetails.duration</span></div><i>→</i><div><strong>Shorts 분류</strong><span>180초 이하 후보</span></div><i>→</i><div><strong>포맷별 백분위</strong><span>Shorts와 롱폼 분리</span></div><i>→</i><div><strong>Early 판정</strong><span>속도·가속 동시 상위</span></div></section>
+    <div className="early-toolbar"><div className="format-filters" aria-label="영상 포맷 필터">
+      {([['ALL', `전체 ${measured.length}`], ['SHORTS', `Shorts 후보 ${shorts}`], ['LONG_FORM', `롱폼 ${measured.length - shorts}`]] as const).map(([value, label]) => <button key={value} className={format === value ? "active" : ""} onClick={() => setFormat(value)}>{label}</button>)}
+    </div><span>Early는 같은 포맷 표본 8개 이상 · 3회 수집 · 공개 18시간 이내에서 판정</span></div>
+    {!measured.length ? <div className="analytics-empty"><Clock3/><strong>영상 길이 수집을 기다리고 있습니다</strong><p>새 배포 이후 수집된 스냅샷부터 포맷과 백분위가 표시됩니다.</p></div> : <section className="early-grid">
+      {candidates.map((video, index) => <button key={video.id} className="early-card" onClick={() => onSelect(video)}>
+        <span className="early-visual"><img src={video.thumbnail} alt="" loading="lazy"/><i>{String(index + 1).padStart(2, "0")}</i><BreakoutBadge video={video}/></span>
+        <span className="early-copy"><span><FormatBadge video={video}/><em>{video.category}</em></span><b>{video.title}</b><small>{video.channel}</small>
+          <span className="early-metrics"><span><small>Momentum</small><strong>{video.momentumScore ?? 0}</strong></span><span><small>속도 백분위</small><strong>{video.velocityPercentile ?? 0}%</strong></span><span><small>가속 백분위</small><strong>{video.accelerationPercentile ?? 0}%</strong></span></span>
+          <span className="early-foot">{velocityText(video)} · 포맷 표본 {video.formatPopulationSize ?? 0}개</span>
+        </span>
+      </button>)}
+    </section>}
+  </main>;
 }
 
 function Hero({ video, isSelection, onClear, scopeLabel, regionLabel }: {
@@ -529,6 +614,7 @@ function ThemeDialog({ open, onOpenChange, theme, onTheme }: { open:boolean; onO
 }
 
 export default function Home() {
+  const [activeTab, setActiveTab] = useState("home");
   const [selected, setSelected] = useState<TrendVideo | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -641,6 +727,7 @@ export default function Home() {
 
   const choose = (video: TrendVideo) => {
     setSelected(video);
+    setActiveTab("home");
     window.scrollTo({
       top: 0,
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
@@ -648,6 +735,7 @@ export default function Home() {
   };
 
   const showHome = () => {
+    setActiveTab("home");
     setSelected(null);
     setFocus(null);
     setActiveCategoryId(null);
@@ -731,10 +819,10 @@ export default function Home() {
         : `${latestRun.status === "success" ? "정상 수집" : latestRun.status === "partial" ? "부분 수집" : latestRun.status === "running" ? "수집 중" : "수집 실패"} · ${formatRelativeTime(latestRun.completedAt ?? latestRun.startedAt)}`;
 
   return <div className="trend-app" data-theme={theme}>
-    <Tabs defaultValue="home" className="app-tabs">
+    <Tabs value={activeTab} onValueChange={setActiveTab} className="app-tabs">
       <header className="topbar">
         <button className="brand" onClick={showHome} aria-label="홈으로"><span className="brand-mark"><TrendingUp/></span><span><b>PULSETUBE</b><small>RADAR</small></span></button>
-        <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
+        <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="early">Early Signals</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
         <div className="region-switch" aria-label="분석 국가 선택">
           {TREND_REGIONS.map((item) => <button key={item.code} className={region === item.code ? "active" : ""} onClick={() => selectRegion(item.code)}>{item.label}</button>)}
         </div>
@@ -752,11 +840,13 @@ export default function Home() {
           <main className="rows-area">{(focus||activeCategory)&&<button className="focus-back" onClick={showHome}><ArrowLeft/> 전체 피드로</button>}
             {categoryLoading&&activeCategory&&<div className="scope-state" role="status"><RefreshCw className="spin"/><strong>{activeCategory.label} 인기 영상을 불러오는 중</strong><span>YouTube Data API 카테고리 조회</span></div>}
             {!categoryLoading&&categoryError&&activeCategory&&<div className="scope-state error" role="alert"><AlertTriangle/><strong>{activeCategory.label} 데이터를 불러오지 못했습니다</strong><span>{categoryError}</span><button onClick={()=>void selectCategory(activeCategory.id)}>다시 시도</button></div>}
+            {!categoryLoading&&activeCategory&&categoryVideos&&<CategorySnapshot category={activeCategory} videos={categoryVideos} regionLabel={activeRegion.label}/>}
             {!dataLoading&&!activeCategory&&!shownRows.length&&<div className="scope-state" role="status"><Database/><strong>표시할 실시간 영상이 없습니다</strong><span>샘플 데이터 대신 YouTube API 연결 상태를 그대로 표시합니다.</span></div>}
             {!focus&&!activeCategory&&allVideos.length>0&&<ChannelStrip videos={allVideos} onSelect={choose}/>}
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
+      <TabsContent value="early" className="tab-content"><EarlySignalsView key={region} videos={allVideos} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
       <TabsContent value="series" className="tab-content"><SeriesView key={region} videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView key={region} videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>

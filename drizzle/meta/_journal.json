@@ -15,6 +15,13 @@
       "when": 1788095594931,
       "tag": "0001_rich_overlord",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788161829138,
+      "tag": "0002_hesitant_songbird",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,8 @@
-import { scoreTrendSignals, type BreakoutStatus } from "./trend-metrics";
+import {
+  scoreTrendSignals,
+  type BreakoutStatus,
+  type TrendVideoFormat,
+} from "./trend-metrics";
 
 export type TrendRegion = "KR" | "JP" | "US";
 
@@ -18,6 +22,9 @@ export type TrendSnapshotVideo = {
   accelerationPercentile: number;
   momentumScore: number;
   breakoutStatus: BreakoutStatus;
+  durationSeconds: number;
+  videoFormat: TrendVideoFormat;
+  formatPopulationSize: number;
   delta: number | null;
   rank: number;
   isNew?: boolean;
@@ -47,6 +54,9 @@ type RankingRow = {
   acceleration_percentile: number;
   momentum_score: number;
   breakout_status: BreakoutStatus;
+  duration_seconds: number;
+  video_format: TrendVideoFormat;
+  format_population_size: number;
   title: string;
   channel: string;
   category_id: string | null;
@@ -108,7 +118,7 @@ const REGION_LABELS: Record<TrendRegion, string> = {
 const signalNote = (row: RankingRow, region: TrendRegion) => {
   const regionLabel = REGION_LABELS[region];
   if (row.breakout_status === "EARLY") {
-    return "3회 이상 수집에서 조회 속도와 가속도가 모두 상위 10%인 초기 급상승 신호입니다.";
+    return `같은 ${row.video_format === "SHORTS" ? "Shorts 후보" : "롱폼"} ${row.format_population_size}개 중 조회 속도와 가속도가 모두 상위 10%인 초기 급상승 신호입니다.`;
   }
   if (row.breakout_status === "BREAKOUT") {
     return "3회 이상 수집에서 조회 속도와 가속도가 모두 상위 20%인 급상승 신호입니다.";
@@ -145,6 +155,9 @@ const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => ({
   accelerationPercentile: row.acceleration_percentile,
   momentumScore: row.momentum_score,
   breakoutStatus: row.breakout_status,
+  durationSeconds: row.duration_seconds,
+  videoFormat: row.video_format,
+  formatPopulationSize: row.format_population_size,
   delta: row.delta,
   rank: row.rank,
   isNew: Boolean(row.is_new),
@@ -184,7 +197,8 @@ export async function readLatestSnapshot(
       `SELECT video_id, rank, previous_rank, delta, is_new, views, likes,
               views_per_hour, view_acceleration, sample_count,
               velocity_percentile, acceleration_percentile, momentum_score,
-              breakout_status, title, channel, category_id, category_name,
+              breakout_status, duration_seconds, video_format,
+              format_population_size, title, channel, category_id, category_name,
               thumbnail, description, tags_json, published_at
        FROM youtube_rankings
        WHERE snapshot_id = ?
@@ -278,6 +292,7 @@ export async function saveSnapshot(
     freshness: item.freshness,
     sampleCount: item.sampleCount,
     ageHours: item.ageHours,
+    format: item.video.videoFormat,
   })));
 
   const snapshotStatement = db
@@ -311,9 +326,10 @@ export async function saveSnapshot(
            (snapshot_id, video_id, rank, previous_rank, delta, is_new, views,
             likes, views_per_hour, previous_views_per_hour, view_acceleration,
             sample_count, velocity_percentile, acceleration_percentile,
-            momentum_score, breakout_status, title, channel, category_id,
+            momentum_score, breakout_status, duration_seconds, video_format,
+            format_population_size, title, channel, category_id,
             category_name, thumbnail, description, tags_json, published_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(snapshot_id, video_id) DO UPDATE SET
            rank = excluded.rank,
            previous_rank = excluded.previous_rank,
@@ -329,6 +345,9 @@ export async function saveSnapshot(
            acceleration_percentile = excluded.acceleration_percentile,
            momentum_score = excluded.momentum_score,
            breakout_status = excluded.breakout_status,
+           duration_seconds = excluded.duration_seconds,
+           video_format = excluded.video_format,
+           format_population_size = excluded.format_population_size,
            title = excluded.title,
            channel = excluded.channel,
            category_id = excluded.category_id,
@@ -355,6 +374,9 @@ export async function saveSnapshot(
         signal.accelerationPercentile,
         signal.momentumScore,
         signal.breakoutStatus,
+        video.durationSeconds,
+        video.videoFormat,
+        signal.formatPopulationSize,
         video.title,
         video.channel,
         video.categoryId,

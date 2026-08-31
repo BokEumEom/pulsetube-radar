@@ -16,6 +16,7 @@ test("does not classify breakout signals before three snapshots", () => {
     freshness: index / 20,
     sampleCount: index === 19 ? 2 : 3,
     ageHours: 10,
+    format: "LONG_FORM",
   }));
 
   assert.equal(scoreTrendSignals(inputs)[19].breakoutStatus, "NONE");
@@ -30,6 +31,7 @@ test("classifies a sufficiently observed top-decile early signal", () => {
     freshness: index / 20,
     sampleCount: 3,
     ageHours: 10,
+    format: "LONG_FORM",
   }));
   const signal = scoreTrendSignals(inputs)[19];
 
@@ -37,4 +39,27 @@ test("classifies a sufficiently observed top-decile early signal", () => {
   assert.equal(signal.velocityPercentile, 100);
   assert.equal(signal.accelerationPercentile, 100);
   assert.equal(signal.momentumScore, 100);
+  assert.equal(signal.formatPopulationSize, 20);
+});
+
+test("calculates percentile ranks inside Shorts and long-form cohorts", () => {
+  const common = {
+    acceleration: 1,
+    relativeGrowth: 0.1,
+    likeRate: 0.01,
+    freshness: 0.8,
+    sampleCount: 3,
+    ageHours: 10,
+  };
+  const signals = scoreTrendSignals([
+    { ...common, format: "SHORTS", velocity: 10 },
+    { ...common, format: "SHORTS", velocity: 20 },
+    { ...common, format: "LONG_FORM", velocity: 1_000 },
+    { ...common, format: "LONG_FORM", velocity: 2_000 },
+  ]);
+
+  assert.equal(signals[1].velocityPercentile, 100);
+  assert.equal(signals[2].velocityPercentile, 0);
+  assert.equal(signals[0].formatPopulationSize, 2);
+  assert.equal(signals[2].formatPopulationSize, 2);
 });

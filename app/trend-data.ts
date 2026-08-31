@@ -14,6 +14,9 @@ export type TrendVideo = {
   accelerationPercentile?: number;
   momentumScore?: number;
   breakoutStatus?: "NONE" | "BREAKOUT" | "EARLY";
+  durationSeconds?: number;
+  videoFormat?: "SHORTS" | "LONG_FORM";
+  formatPopulationSize?: number;
   delta: number | null;
   rank: number;
   isNew?: boolean;
@@ -260,7 +263,7 @@ export function buildLiveRows(
     .slice(0, 10);
   const music = liveVideos.filter((video) => video.category === "음악").slice(0, 10);
   const entertainment = liveVideos
-    .filter((video) => ["엔터테인먼트", "코미디", "영화·애니메이션"].includes(video.category))
+    .filter((video) => video.categoryId === "24" || video.category === "엔터테인먼트")
     .slice(0, 10);
   const gaming = liveVideos.filter((video) => video.category === "게임").slice(0, 10);
 
@@ -322,7 +325,8 @@ export function buildLiveRows(
       id: "entertainment",
       group: "분야",
       label: "엔터테인먼트",
-      title: "엔터테인먼트는 지금",
+      title: `${regionLabel} 엔터테인먼트는 지금`,
+      hint: "전체 인기 목록 중 YouTube 카테고리 24",
       videoIds: entertainment.map((video) => video.id),
     });
   }
@@ -348,8 +352,8 @@ export function buildCategoryRow(
     id: `category-${category.id}`,
     group: "분야",
     label: category.label,
-    title: `${regionLabel} ${category.label} 인기 영상`,
-    hint: "YouTube Data API 카테고리별 현재 인기",
+    title: `${regionLabel} ${category.label}는 지금`,
+    hint: `YouTube Data API 카테고리 ${category.id} 전용 인기 목록`,
     topStyle: true,
     videoIds: categoryVideos.map((video) => video.id),
   };

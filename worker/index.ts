@@ -45,6 +45,9 @@ type YouTubeVideoItem = {
     viewCount?: string;
     likeCount?: string;
   };
+  contentDetails?: {
+    duration?: string;
+  };
 };
 
 type YouTubeVideosResponse = {
@@ -117,6 +120,13 @@ const asCount = (value?: string) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const parseDurationSeconds = (duration?: string) => {
+  const match = duration?.match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/);
+  if (!match) return 0;
+  const [, days = "0", hours = "0", minutes = "0", seconds = "0"] = match;
+  return Math.round(Number(days) * 86_400 + Number(hours) * 3_600 + Number(minutes) * 60 + Number(seconds));
+};
+
 function buildTrendingVideo(
   item: YouTubeVideoItem,
   index: number,
@@ -132,6 +142,8 @@ function buildTrendingVideo(
   );
   const category = CATEGORY_NAMES[item.snippet.categoryId ?? ""] ?? "기타";
   const market = regionLabel(region);
+  const durationSeconds = parseDurationSeconds(item.contentDetails?.duration);
+  const videoFormat = durationSeconds > 0 && durationSeconds <= 180 ? "SHORTS" : "LONG_FORM";
 
   return {
     id: item.id,
@@ -149,6 +161,9 @@ function buildTrendingVideo(
     accelerationPercentile: 0,
     momentumScore: 0,
     breakoutStatus: "NONE" as const,
+    durationSeconds,
+    videoFormat,
+    formatPopulationSize: 0,
     delta: null,
     rank: index + 1,
     thumbnail:
@@ -192,7 +207,7 @@ async function fetchYouTubeTrending(
 
   const apiUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
   const apiParams = new URLSearchParams({
-    part: "snippet,statistics",
+    part: "snippet,statistics,contentDetails",
     chart: "mostPopular",
     regionCode: region,
     maxResults: "25",

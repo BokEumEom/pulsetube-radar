@@ -13,6 +13,7 @@
 - D1 15분 스냅샷과 Cron Trigger
 - 직전 순위 대비 delta, 신규 진입·이탈, 실제 시간당 조회 증가량
 - 세 번째 스냅샷부터 조회 가속도, 모집단 백분위, 모멘텀 점수, 급상승 판정
+- 영상 길이 수집, 180초 이하 Shorts 후보 분류, Shorts·롱폼별 백분위와 Early Signals 화면
 - 예약 수집 실행 상태, 성공 범위, 수집 영상 수, 예상 YouTube API 사용량
 - 24시간·7일·30일 영상 시계열과 7일 카테고리 변화
 - 30일 원시 스냅샷 자동 정리
@@ -67,11 +68,12 @@ drizzle/
 현재 Git 연동 배포는 D1 없이도 성공하도록 구성되어 있습니다. 시계열을 켜려면 아래 작업을 한 번 수행합니다.
 
 1. Cloudflare Dashboard의 **Storage & Databases → D1 SQL database**에서 `pulsetube-radar-history`를 생성합니다.
-2. 생성한 DB의 Console에서 마이그레이션을 번호 순서대로 실행합니다. 기존 DB는 `0001`만 추가로 적용합니다. CLI를 사용한다면 다음과 같습니다.
+2. 생성한 DB의 Console에서 마이그레이션을 번호 순서대로 실행합니다. 기존 DB는 아직 적용하지 않은 번호만 추가로 실행합니다. CLI를 사용한다면 다음과 같습니다.
 
    ```bash
    npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0000_sweet_invaders.sql
    npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0001_rich_overlord.sql
+   npx wrangler d1 execute pulsetube-radar-history --remote --file=drizzle/0002_hesitant_songbird.sql
    ```
 
 3. Workers Builds의 **Build variables and secrets**에 아래 빌드 변수를 추가합니다.
@@ -118,6 +120,7 @@ youtube_rankings
   views, likes, views_per_hour, previous_views_per_hour,
   view_acceleration, sample_count, velocity_percentile,
   acceleration_percentile, momentum_score, breakout_status,
+  duration_seconds, video_format, format_population_size,
   title, channel, category_id, category_name, thumbnail,
   description, tags_json, published_at
 
@@ -131,7 +134,7 @@ youtube_collector_runs
 1. 대한민국(`KR`)·일본(`JP`)·미국(`US`)을 순회합니다.
 2. 국가마다 `videos.list(chart=mostPopular, maxResults=25)` 전체 범위와 고정 8개 카테고리를 호출합니다.
 3. 동일 국가의 직전 스냅샷과 비교해 순위 delta, 신규 진입, 시간당 조회수와 가속도를 계산합니다.
-4. 동일 국가·수집 범위 모집단의 속도·가속도 백분위로 급상승 신호를 판정합니다.
+4. 영상 길이로 Shorts 후보(180초 이하)와 롱폼을 구분한 뒤, 같은 포맷 모집단의 속도·가속도 백분위로 급상승 신호를 판정합니다.
 5. 국가별 snapshot + ranking을 한 트랜잭션으로 저장하고 수집 실행 상태를 기록합니다.
 6. `/api/youtube/trending`은 요청 국가의 최근 D1 스냅샷을 우선 사용하고 국가별 엣지 캐시를 적용합니다.
 7. 30일을 넘긴 원시 스냅샷과 수집 실행 로그를 자동 정리합니다.
