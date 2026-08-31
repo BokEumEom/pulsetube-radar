@@ -3,6 +3,7 @@ import {
   type BreakoutStatus,
   type TrendVideoFormat,
 } from "./trend-metrics";
+import { extractKeywordTokens } from "./keyword-metrics";
 
 export type TrendRegion = "KR" | "JP" | "US";
 
@@ -536,6 +537,119 @@ export async function readChurn(db: D1Database, region: TrendRegion, hours: numb
     entered: row.entered,
     exited: row.exited,
   }));
+}
+
+export async function readRisingKeywords(
+  db: D1Database,
+  region: TrendRegion,
+  hours: number,
+) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
+  const result = await db
+    .prepare(
+      `SELECT s.captured_at, r.video_id, r.title, r.tags_json,
+              r.views_per_hour, r.momentum_score
+       FROM youtube_snapshots s
+       JOIN youtube_rankings r ON r.snapshot_id = s.id
+       WHERE s.region = ? AND s.scope = 'all' AND s.captured_at >= ?
+       ORDER BY s.captured_at ASC`,
+    )
+    .bind(region, minimumCapturedAt)
+    .all<{
+      captured_at: number;
+      video_id: string;
+      title: string;
+      tags_json: string;
+      views_per_hour: number;
+      momentum_score: number;
+    }>();
+
+  const capturedTimes = [...new Set(result.results.map((row) => row.captured_at))];
+  if (capturedTimes.length < 2) {
+    return {
+      ready: false,
+      snapshots: capturedTimes.length,
+      recentFrom: capturedTimes[0] ? new Date(capturedTimes[0] * 1000).toISOString() : null,
+      previousFrom: null,
+      latestCapturedAt: capturedTimes[0] ? new Date(capturedTimes[0] * 1000).toISOString() : null,
+      keywords: [],
+    };
+  }
+
+  const splitIndex = Math.max(1, Math.floor(capturedTimes.length / 2));
+  const splitAt = capturedTimes[splitIndex];
+  const previousRows = result.results.filter((row) => row.captured_at < splitAt);
+  const recentRows = result.results.filter((row) => row.captured_at >= splitAt);
+  type KeywordAggregate = {
+    previousMentions: number;
+    recentMentions: number;
+    recentVelocity: number;
+    videos: Map<string, number>;
+  };
+  const aggregates = new Map<string, KeywordAggregate>();
+  const addRows = (rows: typeof result.results, period: "previous" | "recent") => {
+    rows.forEach((row) => {
+      extractKeywordTokens(row.title, row.tags_json).forEach((keyword) => {
+        const aggregate = aggregates.get(keyword) ?? {
+          previousMentions: 0,
+          recentMentions: 0,
+          recentVelocity: 0,
+          videos: new Map<string, number>(),
+        };
+        if (period === "previous") {
+          aggregate.previousMentions += 1;
+        } else {
+          aggregate.recentMentions += 1;
+          aggregate.recentVelocity += row.views_per_hour;
+          aggregate.videos.set(
+            row.video_id,
+            Math.max(aggregate.videos.get(row.video_id) ?? 0, row.views_per_hour),
+          );
+        }
+        aggregates.set(keyword, aggregate);
+      });
+    });
+  };
+  addRows(previousRows, "previous");
+  addRows(recentRows, "recent");
+
+  const toShare = (mentions: number, total: number) => mentions / Math.max(1, total) * 100;
+  const keywords = [...aggregates.entries()]
+    .map(([keyword, aggregate]) => {
+      const recentShare = toShare(aggregate.recentMentions, recentRows.length);
+      const previousShare = toShare(aggregate.previousMentions, previousRows.length);
+      const shareDelta = recentShare - previousShare;
+      const lift = previousShare > 0 ? recentShare / previousShare : recentShare > 0 ? 3 : 0;
+      const signalScore = Math.round(Math.min(100, Math.max(0,
+        shareDelta * 12 + Math.log2(Math.max(1, lift)) * 14 + recentShare * 2,
+      )));
+      return {
+        keyword,
+        recentMentions: aggregate.recentMentions,
+        previousMentions: aggregate.previousMentions,
+        recentShare: Math.round(recentShare * 10) / 10,
+        previousShare: Math.round(previousShare * 10) / 10,
+        shareDelta: Math.round(shareDelta * 10) / 10,
+        signalScore,
+        averageVelocity: Math.round(aggregate.recentVelocity / Math.max(1, aggregate.recentMentions)),
+        topVideoIds: [...aggregate.videos.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([videoId]) => videoId),
+      };
+    })
+    .filter((keyword) => keyword.recentMentions >= 2 && keyword.shareDelta > 0)
+    .sort((a, b) => b.signalScore - a.signalScore || b.shareDelta - a.shareDelta)
+    .slice(0, 24);
+
+  return {
+    ready: true,
+    snapshots: capturedTimes.length,
+    recentFrom: new Date(splitAt * 1000).toISOString(),
+    previousFrom: new Date(capturedTimes[0] * 1000).toISOString(),
+    latestCapturedAt: new Date(capturedTimes[capturedTimes.length - 1] * 1000).toISOString(),
+    keywords,
+  };
 }
 
 export async function readStorageStatus(db: D1Database, region: TrendRegion) {

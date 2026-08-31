@@ -8,6 +8,7 @@ import {
   readChurn,
   readCollectorStatus,
   readLatestSnapshot,
+  readRisingKeywords,
   readStorageStatus,
   readVideoHistory,
   saveSnapshot,
@@ -526,6 +527,18 @@ const worker = {
           region,
           hours,
           points: await readChurn(db, region, hours),
+        };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/rising-keywords") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const hours = requestedHours(requestUrl);
+        const region = requestedRegion(requestUrl);
+        return {
+          region,
+          hours,
+          ...(await readRisingKeywords(db, region, hours)),
         };
       });
     }

@@ -67,6 +67,29 @@ type ChurnPoint = {
   exited: number;
 };
 
+type RisingKeyword = {
+  keyword: string;
+  recentMentions: number;
+  previousMentions: number;
+  recentShare: number;
+  previousShare: number;
+  shareDelta: number;
+  signalScore: number;
+  averageVelocity: number;
+  topVideoIds: string[];
+};
+
+type RisingKeywordsResponse = {
+  region: TrendRegion;
+  hours: number;
+  ready: boolean;
+  snapshots: number;
+  recentFrom: string | null;
+  previousFrom: string | null;
+  latestCapturedAt: string | null;
+  keywords: RisingKeyword[];
+};
+
 type StorageStatus = {
   enabled: boolean;
   snapshotCount: number;
@@ -324,6 +347,65 @@ function EarlySignalsView({ videos, regionLabel, onSelect }: {
         </span>
       </button>)}
     </section>}
+  </main>;
+}
+
+function RisingKeywordsView({ videos, region, regionLabel, onSelect }: {
+  videos: TrendVideo[];
+  region: TrendRegion;
+  regionLabel: string;
+  onSelect: (video: TrendVideo) => void;
+}) {
+  const [hours, setHours] = useState(24);
+  const [result, setResult] = useState<RisingKeywordsResponse | null>(null);
+  const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void requestAnalytics<RisingKeywordsResponse>(
+      `/api/youtube/rising-keywords?${new URLSearchParams({ region, hours: String(hours) })}`,
+      controller.signal,
+    ).then((data) => {
+      setResult(data);
+      setState("ready");
+    }).catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setResult(null);
+      setState("unavailable");
+    });
+    return () => controller.abort();
+  }, [hours, region]);
+
+  const keywords = result?.keywords ?? [];
+  const topScore = keywords[0]?.signalScore ?? 0;
+  const newKeywords = keywords.filter((keyword) => keyword.previousMentions === 0).length;
+  const findVideo = (keyword: RisingKeyword) => keyword.topVideoIds
+    .map((id) => videos.find((video) => video.id === id))
+    .find(Boolean);
+  const selectHours = (nextHours: number) => {
+    if (nextHours === hours) return;
+    setState("loading");
+    setHours(nextHours);
+  };
+
+  return <main className="subpage keywords-view">
+    <div className="keywords-heading"><div><span>NON-AI TREND EXTRACTION</span><h1>Rising Keywords</h1><p>{regionLabel} 인기 영상의 제목과 태그에서 최근 점유율이 실제로 증가한 키워드를 찾습니다.</p></div>
+      <div className="periods" aria-label="키워드 분석 기간">{[[24,"24시간"],[168,"7일"]].map(([value,label]) => <button key={value} className={hours===value?"active":""} onClick={() => selectHours(Number(value))}>{label}</button>)}</div>
+    </div>
+    <section className="keyword-summary"><div><span>상승 키워드</span><b>{keywords.length}</b></div><div><span>신규 등장</span><b>{newKeywords}</b></div><div><span>최고 신호</span><b>{topScore}</b></div><div><span>비교 스냅샷</span><b>{result?.snapshots ?? 0}</b></div></section>
+    <div className="keyword-method"><Database/><p><strong>계산 기준</strong> 최근 구간과 직전 구간의 전체 인기 영상 대비 언급 점유율을 비교합니다. AI 생성이나 검색량 추정값은 사용하지 않습니다.</p></div>
+    {state === "loading" ? <div className="analytics-empty"><RefreshCw className="spin"/><strong>키워드 변화를 계산하고 있습니다</strong><p>D1 스냅샷의 제목과 태그를 비교하는 중입니다.</p></div>
+      : state === "unavailable" ? <div className="analytics-empty"><Database/><strong>D1 키워드 분석을 사용할 수 없습니다</strong><p>D1 바인딩과 스냅샷 수집 상태를 확인해 주세요.</p></div>
+        : !result?.ready ? <div className="analytics-empty"><Clock3/><strong>비교 스냅샷을 기다리고 있습니다</strong><p>최소 두 번 수집된 뒤 Rising Keywords가 계산됩니다.</p></div>
+          : !keywords.length ? <div className="analytics-empty"><Activity/><strong>현재 기준을 충족한 상승 키워드가 없습니다</strong><p>최근 점유율이 직전 구간보다 증가하고 두 번 이상 등장한 키워드만 표시합니다.</p></div>
+            : <section className="keyword-grid">{keywords.map((keyword, index) => {
+              const representative = findVideo(keyword);
+              return <button key={keyword.keyword} className="keyword-card" onClick={() => representative && onSelect(representative)} disabled={!representative}>
+                <span className="keyword-rank">{String(index + 1).padStart(2,"0")}</span><span className="keyword-main"><span className="keyword-name">#{keyword.keyword}</span><small>최근 {keyword.recentShare}% · 직전 {keyword.previousShare}%</small></span>
+                <span className="keyword-delta">+{keyword.shareDelta}%p</span><span className="keyword-score"><small>SIGNAL</small><b>{keyword.signalScore}</b></span>
+                <span className="keyword-foot">{representative && <img src={representative.thumbnail} alt="" loading="lazy"/>}<span>{representative?.title ?? "대표 영상 확인 중"}<small>평균 +{fmt(keyword.averageVelocity)}/시 · {keyword.recentMentions}회 언급</small></span></span>
+              </button>;
+            })}</section>}
   </main>;
 }
 
@@ -821,7 +903,7 @@ export default function Home() {
     <Tabs value={activeTab} onValueChange={setActiveTab} className="app-tabs">
       <header className="topbar">
         <button className="brand" onClick={showHome} aria-label="홈으로"><span className="brand-mark"><TrendingUp/></span><span><b>PULSETUBE</b><small>RADAR</small></span></button>
-        <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="early">Early Signals</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
+        <TabsList className="top-tabs"><TabsTrigger value="home">홈</TabsTrigger><TabsTrigger value="early">Early Signals</TabsTrigger><TabsTrigger value="keywords">Keywords</TabsTrigger><TabsTrigger value="series">시계열 추이</TabsTrigger><TabsTrigger value="share">점유율 · 리포트</TabsTrigger></TabsList>
         <div className="region-switch" aria-label="분석 국가 선택">
           {TREND_REGIONS.map((item) => <button key={item.code} className={region === item.code ? "active" : ""} onClick={() => selectRegion(item.code)}>{item.label}</button>)}
         </div>
@@ -846,6 +928,7 @@ export default function Home() {
         </div>
       </TabsContent>
       <TabsContent value="early" className="tab-content"><EarlySignalsView key={region} videos={allVideos} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
+      <TabsContent value="keywords" className="tab-content"><RisingKeywordsView key={region} videos={allVideos} region={region} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
       <TabsContent value="series" className="tab-content"><SeriesView key={region} videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView key={region} videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>

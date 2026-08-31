@@ -29,6 +29,7 @@ The project is independently implemented and does not require AWS infrastructure
 - Overall ranking and 8 fixed categories: Music, Gaming, Entertainment, News & Politics, Sports, Film & Animation, Science & Technology, and Comedy
 - Rank changes, new entries, exits, and real view growth per hour
 - Duration collection, duration-based Shorts candidates, format-specific percentiles, and a dedicated Early Signals view
+- Rule-based Rising Keywords from title/tag share changes across consecutive D1 time windows
 - Momentum, acceleration, and breakout signals after enough same-format observations
 - 24-hour, 7-day, and 30-day video history with category-share and churn views
 - Collector health, successful scope count, collected video count, and estimated API quota usage
@@ -122,6 +123,7 @@ The deployed Worker should expose a `DB` binding and the `*/15 * * * *` Cron Tri
 | `GET /api/youtube/history?region=KR&videoId=...&hours=168` | Per-video time series for one region |
 | `GET /api/youtube/category-trends?region=KR&hours=168` | Category-share history for one region |
 | `GET /api/youtube/churn?region=KR&hours=168` | Entries and exits for one region |
+| `GET /api/youtube/rising-keywords?region=KR&hours=24` | Rising title/tag keywords compared with the previous window |
 | `GET /api/youtube/storage-status` | D1 storage state |
 | `GET /api/youtube/collector-status` | Scheduled collector health |
 
@@ -151,6 +153,7 @@ AWS 인프라나 AI 서비스 없이 독립적으로 구현한 프로젝트입�
 - 전체 순위와 음악·게임·엔터테인먼트·뉴스/정치·스포츠·영화/애니메이션·과학기술·코미디 8개 분야
 - 직전 순위 대비 상승·하락, 신규 진입·이탈, 실제 시간당 조회 증가량
 - 영상 길이 수집, 180초 이하 Shorts 후보 분류, 포맷별 백분위와 전용 Early Signals 화면
+- 연속된 D1 구간의 제목·태그 점유율 변화를 비교하는 규칙 기반 Rising Keywords
 - 같은 포맷의 충분한 스냅샷이 쌓인 뒤 가속도·모멘텀·급상승 신호 제공
 - 영상별 24시간·7일·30일 시계열과 카테고리 점유율·진입/이탈 분석
 - 예약 수집 상태, 성공 범위, 수집 영상 수, 예상 API 사용량 확인
