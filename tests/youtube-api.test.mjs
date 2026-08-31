@@ -72,6 +72,8 @@ test("keeps D1 analytics endpoints explicit when storage is not connected", asyn
     "/api/youtube/category-trends?hours=168&region=US",
     "/api/youtube/churn?hours=168&region=JP",
     "/api/youtube/rising-keywords?hours=24&region=KR",
+    "/api/youtube/signals?region=KR",
+    "/api/youtube/signal-validation?region=KR",
     "/api/youtube/storage-status?region=US",
     "/api/youtube/collector-status",
   ]) {

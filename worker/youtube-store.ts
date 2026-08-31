@@ -23,6 +23,12 @@ export type TrendSnapshotVideo = {
   accelerationPercentile: number;
   momentumScore: number;
   breakoutStatus: BreakoutStatus;
+  confidenceLevel?: "LOW" | "MEDIUM" | "HIGH";
+  confidenceScore?: number;
+  confidenceReasons?: string[];
+  channelBaselineVelocity?: number;
+  channelVelocityRatio?: number;
+  channelBaselineVideos?: number;
   durationSeconds: number;
   videoFormat: TrendVideoFormat;
   formatPopulationSize: number;
@@ -140,7 +146,34 @@ const signalNote = (row: RankingRow, region: TrendRegion) => {
       : `직전 수집과 같은 ${row.rank}위를 유지하고 있습니다.`;
 };
 
-const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => ({
+const signalConfidence = (
+  row: Pick<RankingRow, "sample_count" | "format_population_size" | "views_per_hour" | "view_acceleration" | "published_at">,
+  capturedAt = Math.floor(Date.now() / 1000),
+  channelBaselineVideos = 0,
+) => {
+  const ageHours = row.published_at
+    ? Math.max(0, (capturedAt - row.published_at) / 3600)
+    : Number.POSITIVE_INFINITY;
+  const observationScore = Math.min(40, row.sample_count / 6 * 40);
+  const cohortScore = Math.min(25, row.format_population_size / 12 * 25);
+  const movementScore = row.views_per_hour > 0 && row.view_acceleration > 0
+    ? 20
+    : row.views_per_hour > 0 ? 10 : 0;
+  const freshnessScore = ageHours <= 48 ? 10 : ageHours <= 168 ? 5 : 0;
+  const baselineScore = channelBaselineVideos >= 3 ? 5 : channelBaselineVideos >= 2 ? 3 : 0;
+  const score = Math.round(Math.min(100, observationScore + cohortScore + movementScore + freshnessScore + baselineScore));
+  const level = score >= 75 ? "HIGH" : score >= 50 ? "MEDIUM" : "LOW";
+  const reasons = [
+    `${row.sample_count}회 관측`,
+    `동일 포맷 ${row.format_population_size}개 비교`,
+    channelBaselineVideos >= 2 ? `채널 기준 영상 ${channelBaselineVideos}개` : "채널 기준선 축적 중",
+  ];
+  return { level, score, reasons } as const;
+};
+
+const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => {
+  const confidence = signalConfidence(row);
+  return ({
   id: row.video_id,
   title: row.title,
   channel: row.channel,
@@ -156,6 +189,9 @@ const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => ({
   accelerationPercentile: row.acceleration_percentile,
   momentumScore: row.momentum_score,
   breakoutStatus: row.breakout_status,
+  confidenceLevel: confidence.level,
+  confidenceScore: confidence.score,
+  confidenceReasons: confidence.reasons,
   durationSeconds: row.duration_seconds,
   videoFormat: row.video_format,
   formatPopulationSize: row.format_population_size,
@@ -169,7 +205,8 @@ const toVideo = (row: RankingRow, region: TrendRegion): TrendSnapshotVideo => ({
   history: [{ time: "현재", rank: row.rank, views: row.views }],
   publishedAt: row.published_at ? new Date(row.published_at * 1000).toISOString() : undefined,
   source: "youtube",
-});
+  });
+};
 
 export const scopeForCategory = (categoryId: string | null) =>
   categoryId ? `category:${categoryId}` : "all";
@@ -212,6 +249,152 @@ export async function readLatestSnapshot(
   return {
     capturedAt: new Date(snapshot.captured_at * 1000).toISOString(),
     videos: result.results.map((row) => toVideo(row, region)),
+  };
+}
+
+/**
+ * Builds one country-level signal cohort from the latest overall and category
+ * snapshots. A video that appears in multiple scopes is counted once.
+ */
+export async function readLatestSignals(
+  db: D1Database,
+  region: TrendRegion,
+  maxAgeSeconds = 30 * 60,
+) {
+  const minimumCapturedAt = Math.floor(Date.now() / 1000) - maxAgeSeconds;
+  const meta = await db
+    .prepare(
+      `SELECT captured_bucket, MAX(captured_at) AS captured_at,
+              COUNT(DISTINCT scope) AS scope_count
+       FROM youtube_snapshots
+       WHERE region = ? AND captured_at >= ?
+       GROUP BY captured_bucket
+       ORDER BY captured_bucket DESC
+       LIMIT 1`,
+    )
+    .bind(region, minimumCapturedAt)
+    .first<{ captured_bucket: number; captured_at: number; scope_count: number }>();
+  if (!meta) return null;
+
+  const result = await db
+    .prepare(
+      `WITH deduped AS (
+         SELECT r.video_id, r.rank, r.previous_rank, r.delta, r.is_new,
+                r.views, r.likes, r.views_per_hour, r.view_acceleration,
+                r.sample_count, r.velocity_percentile,
+                r.acceleration_percentile, r.momentum_score,
+                r.breakout_status, r.duration_seconds, r.video_format,
+                r.format_population_size, r.title, r.channel, r.category_id,
+                r.category_name, r.thumbnail, r.description, r.tags_json,
+                r.published_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY r.video_id
+                  ORDER BY CASE WHEN s.scope = 'all' THEN 0 ELSE 1 END,
+                           r.momentum_score DESC,
+                           r.rank ASC
+                ) AS video_priority
+         FROM youtube_snapshots s
+         JOIN youtube_rankings r ON r.snapshot_id = s.id
+         WHERE s.region = ? AND s.captured_bucket = ?
+       )
+       SELECT video_id, rank, previous_rank, delta, is_new, views, likes,
+              views_per_hour, view_acceleration, sample_count,
+              velocity_percentile, acceleration_percentile, momentum_score,
+              breakout_status, duration_seconds, video_format,
+              format_population_size, title, channel, category_id,
+              category_name, thumbnail, description, tags_json, published_at
+       FROM deduped
+       WHERE video_priority = 1`,
+    )
+    .bind(region, meta.captured_bucket)
+    .all<RankingRow>();
+  if (!result.results.length) return null;
+
+  const baselineFrom = meta.captured_at - 30 * 24 * 3600;
+  const baselines = await db
+    .prepare(
+      `WITH latest_video AS (
+         SELECT r.channel, r.video_id, r.views_per_hour,
+                ROW_NUMBER() OVER (
+                  PARTITION BY r.video_id
+                  ORDER BY s.captured_at DESC
+                ) AS video_priority
+         FROM youtube_snapshots s
+         JOIN youtube_rankings r ON r.snapshot_id = s.id
+         WHERE s.region = ? AND s.captured_at >= ? AND s.captured_at <= ?
+       )
+       SELECT channel, AVG(views_per_hour) AS baseline_velocity,
+              COUNT(*) AS baseline_videos
+       FROM latest_video
+       WHERE video_priority = 1
+       GROUP BY channel`,
+    )
+    .bind(region, baselineFrom, meta.captured_at)
+    .all<{ channel: string; baseline_velocity: number; baseline_videos: number }>();
+  const baselineByChannel = new Map(baselines.results.map((row) => [row.channel, row]));
+  const now = meta.captured_at;
+  const signals = scoreTrendSignals(result.results.map((row) => {
+    const baseline = baselineByChannel.get(row.channel);
+    const channelRatio = baseline && baseline.baseline_videos >= 2
+      ? row.views_per_hour / Math.max(1, baseline.baseline_velocity)
+      : row.views_per_hour / Math.max(1, row.views);
+    const ageHours = row.published_at ? Math.max(0, (now - row.published_at) / 3600) : 24 * 365;
+    return {
+      velocity: row.views_per_hour,
+      acceleration: row.view_acceleration,
+      relativeGrowth: channelRatio,
+      likeRate: row.likes / Math.max(1, row.views),
+      freshness: Math.max(0, 1 - ageHours / 72),
+      sampleCount: row.sample_count,
+      ageHours,
+      format: row.video_format,
+    };
+  }));
+
+  const videos = result.results.map((row, index) => {
+    const baseline = baselineByChannel.get(row.channel);
+    const baselineVideos = baseline?.baseline_videos ?? 0;
+    const baselineVelocity = Math.round(baseline?.baseline_velocity ?? 0);
+    const channelRatio = baselineVideos >= 2
+      ? Math.round(row.views_per_hour / Math.max(1, baselineVelocity) * 10) / 10
+      : null;
+    const signal = signals[index];
+    const confidence = signalConfidence(
+      { ...row, format_population_size: signal.formatPopulationSize },
+      now,
+      baselineVideos,
+    );
+    const formatLabel = row.video_format === "SHORTS" ? "Shorts 후보" : "롱폼";
+    const baselineText = channelRatio === null
+      ? "채널 기준선은 더 많은 영상이 필요합니다."
+      : `채널 최근 기준보다 ${channelRatio.toFixed(1)}배 빠릅니다.`;
+    return {
+      ...toVideo(row, region),
+      velocityPercentile: signal.velocityPercentile,
+      accelerationPercentile: signal.accelerationPercentile,
+      momentumScore: signal.momentumScore,
+      breakoutStatus: signal.breakoutStatus,
+      formatPopulationSize: signal.formatPopulationSize,
+      confidenceLevel: confidence.level,
+      confidenceScore: confidence.score,
+      confidenceReasons: confidence.reasons,
+      channelBaselineVelocity: baselineVelocity,
+      channelVelocityRatio: channelRatio ?? undefined,
+      channelBaselineVideos: baselineVideos,
+      aiNote: `통합 ${formatLabel} 표본에서 속도 ${signal.velocityPercentile}백분위, 가속 ${signal.accelerationPercentile}백분위입니다. ${baselineText}`,
+    } satisfies TrendSnapshotVideo;
+  }).sort((a, b) => {
+    const weight = (status: BreakoutStatus) => status === "EARLY" ? 2 : status === "BREAKOUT" ? 1 : 0;
+    return weight(b.breakoutStatus) - weight(a.breakoutStatus)
+      || b.momentumScore - a.momentumScore
+      || b.velocity - a.velocity;
+  });
+
+  return {
+    capturedAt: new Date(meta.captured_at * 1000).toISOString(),
+    scopeCount: meta.scope_count,
+    analysisCount: videos.length,
+    videos,
   };
 }
 
@@ -547,16 +730,29 @@ export async function readRisingKeywords(
   const minimumCapturedAt = Math.floor(Date.now() / 1000) - hours * 3600;
   const result = await db
     .prepare(
-      `SELECT s.captured_at, r.video_id, r.title, r.tags_json,
-              r.views_per_hour, r.momentum_score
-       FROM youtube_snapshots s
-       JOIN youtube_rankings r ON r.snapshot_id = s.id
-       WHERE s.region = ? AND s.scope = 'all' AND s.captured_at >= ?
-       ORDER BY s.captured_at ASC`,
+      `WITH deduped AS (
+         SELECT s.captured_bucket, s.captured_at, s.scope, r.video_id,
+                r.title, r.tags_json, r.views_per_hour, r.momentum_score,
+                ROW_NUMBER() OVER (
+                  PARTITION BY s.captured_bucket, r.video_id
+                  ORDER BY CASE WHEN s.scope = 'all' THEN 0 ELSE 1 END,
+                           r.momentum_score DESC
+                ) AS video_priority
+         FROM youtube_snapshots s
+         JOIN youtube_rankings r ON r.snapshot_id = s.id
+         WHERE s.region = ? AND s.captured_at >= ?
+       )
+       SELECT captured_bucket, captured_at, scope, video_id, title, tags_json,
+              views_per_hour, momentum_score
+       FROM deduped
+       WHERE video_priority = 1
+       ORDER BY captured_bucket ASC, video_id ASC`,
     )
     .bind(region, minimumCapturedAt)
     .all<{
+      captured_bucket: number;
       captured_at: number;
+      scope: string;
       video_id: string;
       title: string;
       tags_json: string;
@@ -564,22 +760,27 @@ export async function readRisingKeywords(
       momentum_score: number;
     }>();
 
-  const capturedTimes = [...new Set(result.results.map((row) => row.captured_at))];
+  const capturedTimes = [...new Set(result.results.map((row) => row.captured_bucket))];
+  const analyzedVideos = new Set(result.results.map((row) => row.video_id)).size;
+  const scopeCount = new Set(result.results.map((row) => row.scope)).size;
   if (capturedTimes.length < 2) {
+    const latestCapturedAt = result.results.reduce((latest, row) => Math.max(latest, row.captured_at), 0);
     return {
       ready: false,
       snapshots: capturedTimes.length,
-      recentFrom: capturedTimes[0] ? new Date(capturedTimes[0] * 1000).toISOString() : null,
+      analyzedVideos,
+      scopeCount,
+      recentFrom: latestCapturedAt ? new Date(latestCapturedAt * 1000).toISOString() : null,
       previousFrom: null,
-      latestCapturedAt: capturedTimes[0] ? new Date(capturedTimes[0] * 1000).toISOString() : null,
+      latestCapturedAt: latestCapturedAt ? new Date(latestCapturedAt * 1000).toISOString() : null,
       keywords: [],
     };
   }
 
   const splitIndex = Math.max(1, Math.floor(capturedTimes.length / 2));
   const splitAt = capturedTimes[splitIndex];
-  const previousRows = result.results.filter((row) => row.captured_at < splitAt);
-  const recentRows = result.results.filter((row) => row.captured_at >= splitAt);
+  const previousRows = result.results.filter((row) => row.captured_bucket < splitAt);
+  const recentRows = result.results.filter((row) => row.captured_bucket >= splitAt);
   type KeywordAggregate = {
     previousMentions: number;
     recentMentions: number;
@@ -645,10 +846,87 @@ export async function readRisingKeywords(
   return {
     ready: true,
     snapshots: capturedTimes.length,
-    recentFrom: new Date(splitAt * 1000).toISOString(),
-    previousFrom: new Date(capturedTimes[0] * 1000).toISOString(),
-    latestCapturedAt: new Date(capturedTimes[capturedTimes.length - 1] * 1000).toISOString(),
+    analyzedVideos,
+    scopeCount,
+    recentFrom: new Date(Math.min(...recentRows.map((row) => row.captured_at)) * 1000).toISOString(),
+    previousFrom: new Date(Math.min(...previousRows.map((row) => row.captured_at)) * 1000).toISOString(),
+    latestCapturedAt: new Date(Math.max(...result.results.map((row) => row.captured_at)) * 1000).toISOString(),
     keywords,
+  };
+}
+
+export async function readSignalValidation(
+  db: D1Database,
+  region: TrendRegion,
+  horizonHours = 12,
+) {
+  const now = Math.floor(Date.now() / 1000);
+  const horizonSeconds = horizonHours * 3600;
+  const windowFrom = now - 7 * 24 * 3600;
+  const matureBefore = now - horizonSeconds;
+  const result = await db
+    .prepare(
+      `WITH signal_candidates AS (
+         SELECT s.scope, r.video_id, s.captured_at AS signal_at,
+                r.rank AS signal_rank, r.momentum_score,
+                ROW_NUMBER() OVER (
+                  PARTITION BY s.scope, r.video_id
+                  ORDER BY s.captured_at ASC
+                ) AS signal_priority
+         FROM youtube_snapshots s
+         JOIN youtube_rankings r ON r.snapshot_id = s.id
+         WHERE s.region = ?
+           AND s.captured_at >= ?
+           AND s.captured_at <= ?
+           AND r.breakout_status IN ('EARLY', 'BREAKOUT')
+       ), signals AS (
+         SELECT scope, video_id, signal_at, signal_rank, momentum_score
+         FROM signal_candidates
+         WHERE signal_priority = 1
+       ), outcomes AS (
+         SELECT signal.scope, signal.video_id, signal.signal_at,
+                signal.signal_rank, signal.momentum_score,
+                MIN(later_rank.rank) AS best_rank,
+                MIN(CASE WHEN later_rank.rank <= 10 THEN later.captured_at END) AS top10_at
+         FROM signals signal
+         LEFT JOIN youtube_snapshots later
+           ON later.region = ?
+          AND later.scope = signal.scope
+          AND later.captured_at > signal.signal_at
+          AND later.captured_at <= signal.signal_at + ?
+         LEFT JOIN youtube_rankings later_rank
+           ON later_rank.snapshot_id = later.id
+          AND later_rank.video_id = signal.video_id
+         GROUP BY signal.scope, signal.video_id, signal.signal_at,
+                  signal.signal_rank, signal.momentum_score
+       )
+       SELECT COUNT(*) AS observed_signals,
+              SUM(CASE WHEN top10_at IS NOT NULL THEN 1 ELSE 0 END) AS top10_hits,
+              SUM(CASE WHEN best_rank IS NOT NULL AND signal_rank - best_rank >= 3 THEN 1 ELSE 0 END) AS rising_hits,
+              AVG(CASE WHEN top10_at IS NOT NULL THEN (top10_at - signal_at) / 3600.0 END) AS average_lead_hours
+       FROM outcomes`,
+    )
+    .bind(region, windowFrom, matureBefore, region, horizonSeconds)
+    .first<{
+      observed_signals: number;
+      top10_hits: number;
+      rising_hits: number;
+      average_lead_hours: number | null;
+    }>();
+  const observedSignals = result?.observed_signals ?? 0;
+  const percentage = (value: number) => observedSignals
+    ? Math.round(value / observedSignals * 100)
+    : 0;
+  return {
+    horizonHours,
+    observedSignals,
+    top10Hits: result?.top10_hits ?? 0,
+    top10Rate: percentage(result?.top10_hits ?? 0),
+    risingHits: result?.rising_hits ?? 0,
+    risingRate: percentage(result?.rising_hits ?? 0),
+    averageLeadHours: result?.average_lead_hours === null || result?.average_lead_hours === undefined
+      ? null
+      : Math.round(result.average_lead_hours * 10) / 10,
   };
 }
 

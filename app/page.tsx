@@ -84,10 +84,31 @@ type RisingKeywordsResponse = {
   hours: number;
   ready: boolean;
   snapshots: number;
+  analyzedVideos: number;
+  scopeCount: number;
   recentFrom: string | null;
   previousFrom: string | null;
   latestCapturedAt: string | null;
   keywords: RisingKeyword[];
+};
+
+type SignalFeedResponse = {
+  region: TrendRegion;
+  capturedAt: string | null;
+  scopeCount: number;
+  analysisCount: number;
+  videos: TrendVideo[];
+};
+
+type SignalValidationResponse = {
+  region: TrendRegion;
+  horizonHours: number;
+  observedSignals: number;
+  top10Hits: number;
+  top10Rate: number;
+  risingHits: number;
+  risingRate: number;
+  averageLeadHours: number | null;
 };
 
 type StorageStatus = {
@@ -206,6 +227,14 @@ function BreakoutBadge({ video }: { video: TrendVideo }) {
   return null;
 }
 
+function ConfidenceBadge({ video }: { video: TrendVideo }) {
+  const level = video.confidenceLevel ?? "LOW";
+  const label = level === "HIGH" ? "높은 신뢰" : level === "MEDIUM" ? "보통 신뢰" : "관측 중";
+  return <span className={`confidence-badge ${level.toLowerCase()}`} title={(video.confidenceReasons ?? []).join(" · ")}>
+    {label} {video.confidenceScore ?? 0}
+  </span>;
+}
+
 function Delta({ video }: { video: TrendVideo }) {
   if (video.isNew) return <span className="delta new">NEW</span>;
   if (video.delta === null || video.delta === 0) return <span className="delta steady">–</span>;
@@ -311,12 +340,26 @@ function CategorySnapshot({ category, videos, regionLabel }: {
   </section>;
 }
 
-function EarlySignalsView({ videos, regionLabel, onSelect }: {
+function EarlySignalsView({ videos, region, regionLabel, scopeCount, onSelect }: {
   videos: TrendVideo[];
+  region: TrendRegion;
   regionLabel: string;
+  scopeCount: number;
   onSelect: (video: TrendVideo) => void;
 }) {
   const [format, setFormat] = useState<"ALL" | "SHORTS" | "LONG_FORM">("ALL");
+  const [validation, setValidation] = useState<SignalValidationResponse | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void requestAnalytics<SignalValidationResponse>(
+      `/api/youtube/signal-validation?${new URLSearchParams({ region })}`,
+      controller.signal,
+    ).then(setValidation).catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setValidation(null);
+    });
+    return () => controller.abort();
+  }, [region]);
   const measured = videos.filter((video) => video.videoFormat);
   const candidates = [...measured]
     .filter((video) => format === "ALL" || video.videoFormat === format)
@@ -327,14 +370,19 @@ function EarlySignalsView({ videos, regionLabel, onSelect }: {
         || (b.accelerationPercentile ?? 0) - (a.accelerationPercentile ?? 0);
     });
   const confirmed = candidates.filter((video) => video.breakoutStatus && video.breakoutStatus !== "NONE").length;
-  const observed = candidates.filter((video) => (video.sampleCount ?? 1) >= 3).length;
   const shorts = measured.filter((video) => video.videoFormat === "SHORTS").length;
 
   return <main className="subpage early-signals-view">
-    <div className="early-heading"><div><span>FORMAT-AWARE DETECTION</span><h1>Early Signals</h1><p>{regionLabel}에서 이미 뜬 영상보다 지금 가속하기 시작한 영상을 포맷별로 비교합니다.</p></div>
-      <div className="early-summary"><b>{confirmed}</b><span>활성 신호</span><small>{observed}개가 3회 이상 관측됨</small></div>
+    <div className="early-heading"><div><span>EXPLAINABLE EARLY DETECTION</span><h1>Early Signals</h1><p>{regionLabel}의 전체·카테고리 피드를 통합해 지금 가속하기 시작한 영상을 찾습니다.</p></div>
+      <div className="early-summary"><b>{confirmed}</b><span>활성 신호</span><small>{videos.length}개 영상 · {scopeCount || 1}개 범위 분석</small></div>
     </div>
-    <section className="early-method"><div><strong>영상 길이 수집</strong><span>contentDetails.duration</span></div><i>→</i><div><strong>Shorts 분류</strong><span>180초 이하 후보</span></div><i>→</i><div><strong>포맷별 백분위</strong><span>Shorts와 롱폼 분리</span></div><i>→</i><div><strong>Early 판정</strong><span>속도·가속 동시 상위</span></div></section>
+    <section className="early-method"><div><strong>범위 통합</strong><span>전체+카테고리 중복 제거</span></div><i>→</i><div><strong>포맷 분리</strong><span>Shorts 후보와 롱폼</span></div><i>→</i><div><strong>채널 기준 보정</strong><span>최근 영상 대비 속도</span></div><i>→</i><div><strong>신뢰도 판정</strong><span>표본·관측·가속 근거</span></div></section>
+    <section className="validation-strip" aria-label="12시간 신호 사후 검증">
+      <div><span>검증 가능한 신호</span><b>{validation?.observedSignals ?? 0}</b></div>
+      <div><span>12시간 내 Top 10</span><b>{validation?.observedSignals ? `${validation.top10Rate}%` : "축적 중"}</b></div>
+      <div><span>3계단 이상 상승</span><b>{validation?.observedSignals ? `${validation.risingRate}%` : "축적 중"}</b></div>
+      <div><span>평균 도달 시간</span><b>{validation?.averageLeadHours === null || validation?.averageLeadHours === undefined ? "—" : `${validation.averageLeadHours}시간`}</b></div>
+    </section>
     <div className="early-toolbar"><div className="format-filters" aria-label="영상 포맷 필터">
       {([['ALL', `전체 ${measured.length}`], ['SHORTS', `Shorts 후보 ${shorts}`], ['LONG_FORM', `롱폼 ${measured.length - shorts}`]] as const).map(([value, label]) => <button key={value} className={format === value ? "active" : ""} onClick={() => setFormat(value)}>{label}</button>)}
     </div><span>Early는 같은 포맷 표본 8개 이상 · 3회 수집 · 공개 18시간 이내에서 판정</span></div>
@@ -343,7 +391,8 @@ function EarlySignalsView({ videos, regionLabel, onSelect }: {
         <span className="early-visual"><img src={video.thumbnail} alt="" loading="lazy"/><i>{String(index + 1).padStart(2, "0")}</i><BreakoutBadge video={video}/></span>
         <span className="early-copy"><span><FormatBadge video={video}/><em>{video.category}</em></span><b>{video.title}</b><small>{video.channel}</small>
           <span className="early-metrics"><span><small>Momentum</small><strong>{video.momentumScore ?? 0}</strong></span><span><small>속도 백분위</small><strong>{video.velocityPercentile ?? 0}%</strong></span><span><small>가속 백분위</small><strong>{video.accelerationPercentile ?? 0}%</strong></span></span>
-          <span className="early-foot">{velocityText(video)} · 포맷 표본 {video.formatPopulationSize ?? 0}개</span>
+          <span className="confidence-line"><ConfidenceBadge video={video}/>{video.channelVelocityRatio ? <em>채널 기준 {video.channelVelocityRatio}배</em> : <em>채널 기준선 축적 중</em>}</span>
+          <span className="early-foot">{velocityText(video)} · 포맷 표본 {video.formatPopulationSize ?? 0}개 · {video.sampleCount ?? 1}회 관측</span>
         </span>
       </button>)}
     </section>}
@@ -377,8 +426,6 @@ function RisingKeywordsView({ videos, region, regionLabel, onSelect }: {
   }, [hours, region]);
 
   const keywords = result?.keywords ?? [];
-  const topScore = keywords[0]?.signalScore ?? 0;
-  const newKeywords = keywords.filter((keyword) => keyword.previousMentions === 0).length;
   const findVideo = (keyword: RisingKeyword) => keyword.topVideoIds
     .map((id) => videos.find((video) => video.id === id))
     .find(Boolean);
@@ -389,11 +436,11 @@ function RisingKeywordsView({ videos, region, regionLabel, onSelect }: {
   };
 
   return <main className="subpage keywords-view">
-    <div className="keywords-heading"><div><span>NON-AI TREND EXTRACTION</span><h1>Rising Keywords</h1><p>{regionLabel} 인기 영상의 제목과 태그에서 최근 점유율이 실제로 증가한 키워드를 찾습니다.</p></div>
+    <div className="keywords-heading"><div><span>NON-AI TREND EXTRACTION</span><h1>Rising Keywords</h1><p>{regionLabel} 전체·카테고리 영상의 제목과 태그를 합쳐 실제 점유율이 증가한 키워드를 찾습니다.</p></div>
       <div className="periods" aria-label="키워드 분석 기간">{[[24,"24시간"],[168,"7일"]].map(([value,label]) => <button key={value} className={hours===value?"active":""} onClick={() => selectHours(Number(value))}>{label}</button>)}</div>
     </div>
-    <section className="keyword-summary"><div><span>상승 키워드</span><b>{keywords.length}</b></div><div><span>신규 등장</span><b>{newKeywords}</b></div><div><span>최고 신호</span><b>{topScore}</b></div><div><span>비교 스냅샷</span><b>{result?.snapshots ?? 0}</b></div></section>
-    <div className="keyword-method"><Database/><p><strong>계산 기준</strong> 최근 구간과 직전 구간의 전체 인기 영상 대비 언급 점유율을 비교합니다. AI 생성이나 검색량 추정값은 사용하지 않습니다.</p></div>
+    <section className="keyword-summary"><div><span>상승 키워드</span><b>{keywords.length}</b></div><div><span>분석 영상</span><b>{result?.analyzedVideos ?? 0}</b></div><div><span>통합 범위</span><b>{result?.scopeCount ?? 0}</b></div><div><span>비교 구간</span><b>{result?.snapshots ?? 0}</b></div></section>
+    <div className="keyword-method"><Database/><p><strong>계산 기준</strong> 전체와 8개 카테고리 피드를 구간별로 합친 뒤 같은 영상을 중복 제거하고 언급 점유율을 비교합니다. AI 생성이나 검색량 추정값은 사용하지 않습니다.</p></div>
     {state === "loading" ? <div className="analytics-empty"><RefreshCw className="spin"/><strong>키워드 변화를 계산하고 있습니다</strong><p>D1 스냅샷의 제목과 태그를 비교하는 중입니다.</p></div>
       : state === "unavailable" ? <div className="analytics-empty"><Database/><strong>D1 키워드 분석을 사용할 수 없습니다</strong><p>D1 바인딩과 스냅샷 수집 상태를 확인해 주세요.</p></div>
         : !result?.ready ? <div className="analytics-empty"><Clock3/><strong>비교 스냅샷을 기다리고 있습니다</strong><p>최소 두 번 수집된 뒤 Rising Keywords가 계산됩니다.</p></div>
@@ -409,9 +456,10 @@ function RisingKeywordsView({ videos, region, regionLabel, onSelect }: {
   </main>;
 }
 
-function Hero({ video, isSelection, onClear, scopeLabel, regionLabel }: {
+function Hero({ video, isSelection, isSignalLead, onClear, scopeLabel, regionLabel }: {
   video: TrendVideo;
   isSelection: boolean;
+  isSignalLead?: boolean;
   onClear: () => void;
   scopeLabel?: string;
   regionLabel: string;
@@ -420,8 +468,8 @@ function Hero({ video, isSelection, onClear, scopeLabel, regionLabel }: {
     <img className="hero-image" src={`https://i.ytimg.com/vi/${video.id}/maxresdefault.jpg`} alt="" />
     <div className="hero-wash" />
     <div className="hero-copy">
-      <div className="eyebrow"><span>{isSelection ? `현재 ${video.rank}위` : scopeLabel ? `${scopeLabel} 1위` : `지금 ${regionLabel} 1위`}</span>
-        <span className="category-chip">{video.category}</span>{video.isNew && <span className="new-chip">오늘 첫 진입</span>}<BreakoutBadge video={video}/>
+      <div className="eyebrow"><span>{isSelection ? `현재 ${video.rank}위` : scopeLabel ? `${scopeLabel} 1위` : isSignalLead ? `EARLY SIGNAL · 현재 ${video.rank}위` : `지금 ${regionLabel} 1위`}</span>
+        <span className="category-chip">{video.category}</span>{video.isNew && <span className="new-chip">오늘 첫 진입</span>}<BreakoutBadge video={video}/>{isSignalLead && <ConfidenceBadge video={video}/>}
       </div>
       <h1>{video.title}</h1><p>{video.description}</p>
       <div className="ai-line"><span>SIGNAL</span>{video.aiNote}</div>
@@ -431,7 +479,7 @@ function Hero({ video, isSelection, onClear, scopeLabel, regionLabel }: {
         {isSelection && <button className="secondary-action" onClick={onClear}><ArrowLeft /> 목록으로</button>}
       </div>
     </div>
-    <div className="live-pill"><span /> YOUTUBE LIVE</div>
+    <div className="live-pill"><span /> {isSignalLead ? "EXPLAINED SIGNAL" : "YOUTUBE LIVE"}</div>
   </section>;
 }
 
@@ -703,6 +751,7 @@ export default function Home() {
   const [updatedAt, setUpdatedAt] = useState("--:--");
   const [refreshing, setRefreshing] = useState(false);
   const [liveVideos, setLiveVideos] = useState<TrendVideo[] | null>(null);
+  const [signalFeed, setSignalFeed] = useState<SignalFeedResponse | null>(null);
   const [dataError, setDataError] = useState<string | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
   const [region, setRegion] = useState<TrendRegion>("KR");
@@ -753,10 +802,24 @@ export default function Home() {
       }
     };
 
-    void Promise.allSettled([load(), loadCollector()]);
+    const loadSignals = async () => {
+      try {
+        const data = await requestAnalytics<SignalFeedResponse>(
+          `/api/youtube/signals?${new URLSearchParams({ region })}`,
+          controller.signal,
+        );
+        setSignalFeed(data.videos.length ? data : null);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setSignalFeed(null);
+      }
+    };
+
+    void Promise.allSettled([load(), loadCollector(), loadSignals()]);
     const pollId = window.setInterval(() => {
       void load(true);
       void loadCollector();
+      void loadSignals();
     }, 60_000);
 
     return () => {
@@ -779,6 +842,7 @@ export default function Home() {
     setCategoryCache({});
     setCategoryError(null);
     setLiveVideos(null);
+    setSignalFeed(null);
     setDataError(null);
     setDataLoading(true);
     setRegion(next);
@@ -786,6 +850,7 @@ export default function Home() {
 
   const activeRegion = TREND_REGIONS.find((item) => item.code === region) ?? TREND_REGIONS[0];
   const allVideos = useMemo(() => liveVideos ?? [], [liveVideos]);
+  const signalVideos = signalFeed?.videos?.length ? signalFeed.videos : allVideos;
   const isLive = allVideos.length > 0;
   const baseRows = useMemo(
     () => buildLiveRows(allVideos, activeRegion.label),
@@ -864,9 +929,13 @@ export default function Home() {
       setSelected(null);
       setUpdatedAt(formatCapturedAt(data.capturedAt));
       try {
-        const status = await requestAnalytics<CollectorStatus>("/api/youtube/collector-status");
+        const [status, signals] = await Promise.all([
+          requestAnalytics<CollectorStatus>("/api/youtube/collector-status"),
+          requestAnalytics<SignalFeedResponse>(`/api/youtube/signals?${new URLSearchParams({ region })}`),
+        ]);
         setCollectorStatus(status);
         setCollectorState("ready");
+        setSignalFeed(signals.videos.length ? signals : null);
       } catch {
         setCollectorState("unavailable");
       }
@@ -889,7 +958,11 @@ export default function Home() {
     return counts;
   }, {});
   const dominantCategory = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "기타";
-  const heroVideo = selected ?? visibleVideos[0] ?? allVideos[0];
+  const leadSignal = signalVideos.find((video) => video.breakoutStatus === "EARLY")
+    ?? signalVideos.find((video) => video.breakoutStatus === "BREAKOUT")
+    ?? signalVideos.find((video) => (video.sampleCount ?? 1) >= 3 && (video.acceleration ?? 0) > 0);
+  const isSignalLead = !selected && !activeCategory && !focus && Boolean(leadSignal);
+  const heroVideo = selected ?? (activeCategory ? visibleVideos[0] : leadSignal) ?? visibleVideos[0] ?? allVideos[0];
   const latestRun = collectorStatus?.latestRun;
   const collectorLabel = collectorState === "loading"
     ? "수집 상태 확인 중"
@@ -910,8 +983,8 @@ export default function Home() {
         <div className={`capture ${latestRun?.status ?? collectorState}`}><span/> {collectorLabel}</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
-        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>} {selected&&<HistoryPanel video={selected} region={region}/>}
-        {metricVideos.length>0&&<section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>현재</em></div><div><TrendingUp/><span>{(fastestAcceleration?.sampleCount ?? 1)>=3?"최대 조회 가속":"조회 속도"}</span><b>{(fastestAcceleration?.sampleCount ?? 1)>=3?accelerationText(fastestAcceleration):`${fmt(fastest.velocity)}/시`}</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>현재 범위</span><b>{metricVideos.length}개 영상</b></div></section>}
+        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} isSignalLead={isSignalLead} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>} {selected&&<HistoryPanel video={selected} region={region}/>}
+        {metricVideos.length>0&&<section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>현재</em></div><div><TrendingUp/><span>{(fastestAcceleration?.sampleCount ?? 1)>=3?"최대 조회 가속":"조회 속도"}</span><b>{(fastestAcceleration?.sampleCount ?? 1)>=3?accelerationText(fastestAcceleration):`${fmt(fastest.velocity)}/시`}</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>{activeCategory?"현재 분석 대상":"통합 신호 분석"}</span><b>{activeCategory?metricVideos.length:(signalFeed?.analysisCount??metricVideos.length)}개 영상</b><em>{!activeCategory&&signalFeed?`${signalFeed.scopeCount}개 범위`:"현재 피드"}</em></div></section>}
         <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
           {groups.map((group)=>{const groupRows=baseRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={!activeCategory&&focus===row.id?"active":""} onClick={()=>selectRow(row.id)}>{row.label}</button>)}</Fragment>})}
           <h3>분야</h3>
@@ -927,8 +1000,8 @@ export default function Home() {
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
-      <TabsContent value="early" className="tab-content"><EarlySignalsView key={region} videos={allVideos} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
-      <TabsContent value="keywords" className="tab-content"><RisingKeywordsView key={region} videos={allVideos} region={region} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
+      <TabsContent value="early" className="tab-content"><EarlySignalsView key={region} videos={signalVideos} region={region} regionLabel={activeRegion.label} scopeCount={signalFeed?.scopeCount ?? 1} onSelect={choose}/></TabsContent>
+      <TabsContent value="keywords" className="tab-content"><RisingKeywordsView key={region} videos={signalVideos} region={region} regionLabel={activeRegion.label} onSelect={choose}/></TabsContent>
       <TabsContent value="series" className="tab-content"><SeriesView key={region} videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView key={region} videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>

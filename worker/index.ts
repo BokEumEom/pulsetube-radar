@@ -7,8 +7,10 @@ import {
   readCategoryTrends,
   readChurn,
   readCollectorStatus,
+  readLatestSignals,
   readLatestSnapshot,
   readRisingKeywords,
+  readSignalValidation,
   readStorageStatus,
   readVideoHistory,
   saveSnapshot,
@@ -540,6 +542,24 @@ const worker = {
           hours,
           ...(await readRisingKeywords(db, region, hours)),
         };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/signals") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const region = requestedRegion(requestUrl);
+        const result = await readLatestSignals(db, region);
+        if (!result) {
+          return { region, capturedAt: null, scopeCount: 0, analysisCount: 0, videos: [] };
+        }
+        return { region, ...result };
+      });
+    }
+
+    if (url.pathname === "/api/youtube/signal-validation") {
+      return handleStorageRequest(request, env, async (db, requestUrl) => {
+        const region = requestedRegion(requestUrl);
+        return { region, ...(await readSignalValidation(db, region, 12)) };
       });
     }
 

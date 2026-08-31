@@ -14,6 +14,12 @@ export type TrendVideo = {
   accelerationPercentile?: number;
   momentumScore?: number;
   breakoutStatus?: "NONE" | "BREAKOUT" | "EARLY";
+  confidenceLevel?: "LOW" | "MEDIUM" | "HIGH";
+  confidenceScore?: number;
+  confidenceReasons?: string[];
+  channelBaselineVelocity?: number;
+  channelVelocityRatio?: number;
+  channelBaselineVideos?: number;
   durationSeconds?: number;
   videoFormat?: "SHORTS" | "LONG_FORM";
   formatPopulationSize?: number;
