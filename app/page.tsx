@@ -22,6 +22,8 @@ import {
   type TrendRow,
   type TrendVideo,
 } from "./trend-data";
+import { FeedAdSlot } from "@/components/ad-slot";
+import { SiteFooter } from "@/components/site-footer";
 
 type TrendRegion = "KR" | "JP" | "US";
 
@@ -558,9 +560,19 @@ function DataTrustPanel({ meta, regionLabel, categoryLabel, collectorStatus, col
   collectorState: "loading" | "ready" | "unavailable";
   loading: boolean;
 }) {
+  const [clock, setClock] = useState<number | null>(null);
+  useEffect(() => {
+    const updateClock = () => setClock(Date.now());
+    const initialId = window.setTimeout(updateClock, 0);
+    const intervalId = window.setInterval(updateClock, 60_000);
+    return () => {
+      window.clearTimeout(initialId);
+      window.clearInterval(intervalId);
+    };
+  }, []);
   const capturedTime = meta ? new Date(meta.capturedAt).getTime() : Number.NaN;
-  const ageMinutes = Number.isFinite(capturedTime)
-    ? Math.max(0, Math.floor((Date.now() - capturedTime) / 60_000))
+  const ageMinutes = Number.isFinite(capturedTime) && clock !== null
+    ? Math.max(0, Math.floor((clock - capturedTime) / 60_000))
     : null;
   const freshness = loading && !meta
     ? { tone: "checking", label: "데이터 확인 중", detail: "기준 시각 확인 중" }
@@ -1093,6 +1105,7 @@ export default function Home() {
             {!categoryLoading&&activeCategory&&activeCategory.id!=="24"&&categoryVideos&&<CategorySnapshot category={activeCategory} videos={categoryVideos} regionLabel={activeRegion.label}/>}
             {!dataLoading&&!activeCategory&&!shownRows.length&&<div className="scope-state" role="status"><Database/><strong>표시할 실시간 영상이 없습니다</strong><span>샘플 데이터 대신 YouTube API 연결 상태를 그대로 표시합니다.</span></div>}
             {!focus&&!activeCategory&&allVideos.length>0&&<ChannelStrip videos={allVideos} onSelect={choose}/>}
+            {!focus&&!activeCategory&&allVideos.length>0&&<FeedAdSlot/>}
             {shownRows.map((row)=><TrendStrip key={row.id} row={row} videos={visibleVideos.length?visibleVideos:allVideos} onSelect={choose}/>)}</main>
         </div>
       </TabsContent>
@@ -1101,6 +1114,6 @@ export default function Home() {
       <TabsContent value="series" className="tab-content"><SeriesView key={region} videos={allVideos} region={region}/></TabsContent><TabsContent value="share" className="tab-content"><ShareView key={region} videos={allVideos} isLive={isLive} region={region} regionLabel={activeRegion.label}/></TabsContent>
     </Tabs>
     <ThemeDialog open={themeOpen} onOpenChange={setThemeOpen} theme={theme} onTheme={applyTheme}/>
-    <footer><span>PULSETUBE RADAR</span><p>{isLive?`YouTube Data API v3 · ${activeRegion.label} 현재 인기 영상 · D1 15분 스냅샷`:"실데이터 연결 필요 · 샘플 데이터 미표시"}</p></footer>
+    <SiteFooter status={isLive?`YouTube Data API v3 · ${activeRegion.label} 현재 인기 영상 · D1 15분 스냅샷`:"실데이터 연결 필요 · 샘플 데이터 미표시"}/>
   </div>;
 }

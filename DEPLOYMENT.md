@@ -96,6 +96,33 @@ drizzle/
 - `GET /api/youtube/storage-status?region=KR`
 - `GET /api/youtube/collector-status`
 
+## Google AdSense 적용
+
+광고는 홈의 채널 탐색과 인기 영상 목록 사이에 수동 인피드 슬롯 한 개만 표시합니다. 모바일에서는 최대 8개의 채널 카드를 지난 뒤 같은 슬롯이 표시됩니다. 히어로, Early Signals, Rising Keywords 상단에는 광고를 삽입하지 않습니다.
+
+Cloudflare Dashboard의 **Workers & Pages → pulsetube-radar → Settings → Variables and Secrets**에서 다음 Runtime variables를 설정합니다. 게시자 ID와 슬롯 ID는 비밀값이 아니므로 일반 Text 변수로 등록합니다.
+
+| 이름 | 예시 | 필수 |
+| --- | --- | --- |
+| `ADSENSE_PUBLISHER_ID` | `ca-pub-1234567890123456` | 예 |
+| `ADSENSE_FEED_SLOT_ID` | `1234567890` | 광고 노출 시 |
+| `ADSENSE_FEED_LAYOUT_KEY` | AdSense 인피드 광고 코드의 `data-ad-layout-key` 값 | 인피드 형식 사용 시 |
+
+동작 방식:
+
+- 게시자 ID가 유효하면 모든 HTML의 `<head>`에 AdSense 확인 메타 태그와 공식 스크립트를 주입합니다.
+- 슬롯 ID가 함께 설정된 경우에만 홈의 광고 영역을 렌더링합니다. 설정 전에는 빈 광고 박스를 노출하지 않습니다.
+- `https://서비스도메인/ads.txt`에는 게시자 ID를 이용한 Google DIRECT 항목을 자동으로 제공합니다.
+- AdSense의 **광고 → 사이트 기준 → 자동 광고**는 끄고, 이 저장소의 수동 인피드 슬롯만 사용하는 것을 권장합니다. 자동 광고를 켜면 히어로나 Early Signals에도 임의로 광고가 배치될 수 있습니다.
+
+심사 전 확인:
+
+1. `/privacy`, `/terms`, `/contact`가 정상적으로 열리는지 확인합니다.
+2. AdSense에서 사이트를 추가하고 게시자 ID를 Runtime variable에 등록한 뒤 재배포합니다.
+3. `/ads.txt`가 HTTP 200과 올바른 게시자 ID를 반환하는지 확인합니다.
+4. AdSense의 **개인정보 보호 및 메시지**에서 Google CMP를 활성화하고 EEA·영국·스위스 사용자의 동의 선택을 설정합니다.
+5. 승인 후 인피드 광고 단위를 만든 뒤 슬롯 ID와 필요한 경우 레이아웃 키를 등록합니다.
+
 ## 대안: Vercel + Postgres
 
 프런트엔드 팀이 Next.js App Router를 선호하거나 관계형 분석 쿼리를 빠르게 확장해야 할 때 적합합니다.

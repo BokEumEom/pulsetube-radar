@@ -24,6 +24,9 @@ interface Env {
   ASSETS: Fetcher;
   DB?: D1Database;
   YT_API_KEY?: string;
+  ADSENSE_PUBLISHER_ID?: string;
+  ADSENSE_FEED_SLOT_ID?: string;
+  ADSENSE_FEED_LAYOUT_KEY?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -32,6 +35,51 @@ interface Env {
     };
   };
 }
+
+const readAdSenseConfig = (env?: Env) => {
+  const publisherMatch = env?.ADSENSE_PUBLISHER_ID?.trim().match(/^(?:ca-)?(pub-\d{16})$/);
+  if (!publisherMatch) return null;
+
+  const slot = env?.ADSENSE_FEED_SLOT_ID?.trim() ?? "";
+  const layoutKey = env?.ADSENSE_FEED_LAYOUT_KEY?.trim() ?? "";
+  return {
+    client: `ca-${publisherMatch[1]}`,
+    publisher: publisherMatch[1],
+    slot: /^\d+$/.test(slot) ? slot : null,
+    layoutKey: /^[-+A-Za-z0-9/]+$/.test(layoutKey) ? layoutKey : null,
+  };
+};
+
+const injectAdSenseConfig = async (response: Response, env: Env) => {
+  const config = readAdSenseConfig(env);
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!config || [204, 205, 304].includes(response.status) || !contentType.toLowerCase().startsWith("text/html")) {
+    return response;
+  }
+
+  const html = await response.text();
+  const htmlAttributes = [
+    `data-adsense-client="${config.client}"`,
+    config.slot ? `data-adsense-feed-slot="${config.slot}"` : "",
+    config.layoutKey ? `data-adsense-feed-layout-key="${config.layoutKey}"` : "",
+  ].filter(Boolean).join(" ");
+  const headMarkup = [
+    `<meta name="google-adsense-account" content="${config.client}">`,
+    `<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${config.client}" crossorigin="anonymous"></script>`,
+  ].join("");
+  const body = html
+    .replace(/<html\b/i, `<html ${htmlAttributes}`)
+    .replace(/<\/head>/i, `${headMarkup}</head>`);
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  headers.delete("Content-Encoding");
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+};
 
 type YouTubeVideoItem = {
   id?: string;
@@ -485,6 +533,17 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if (url.pathname === "/ads.txt") {
+      const config = readAdSenseConfig(env);
+      return new Response(
+        config ? `google.com, ${config.publisher}, DIRECT, f08c47fec0942fa0\n` : "",
+        {
+          status: config ? 200 : 404,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600" },
+        },
+      );
+    }
+
     if (url.pathname === "/api/youtube/trending") {
       if (request.method !== "GET") {
         return jsonResponse(
@@ -612,7 +671,7 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    return injectAdSenseConfig(await handler.fetch(request, env, ctx), env);
   },
 
   async scheduled(
