@@ -14,6 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   buildCategoryRow,
   buildLiveRows,
@@ -146,6 +147,13 @@ type SnapshotMeta = {
   category: { id: string; label: string } | null;
 };
 
+type DataFreshness = {
+  tone: "checking" | "fresh" | "delayed" | "stale" | "unavailable";
+  label: string;
+  detail: string;
+  ageMinutes: number | null;
+};
+
 const toSnapshotMeta = (response: TrendingApiResponse): SnapshotMeta => ({
   source: response.source,
   capturedAt: response.capturedAt,
@@ -182,6 +190,31 @@ const formatRelativeTime = (value: string | null) => {
   const hours = Math.floor(minutes / 60);
   return hours < 24 ? `${hours}시간 전` : `${Math.floor(hours / 24)}일 전`;
 };
+
+function useDataFreshness(meta: SnapshotMeta | null, loading: boolean): DataFreshness {
+  const [clock, setClock] = useState<number | null>(null);
+
+  useEffect(() => {
+    const updateClock = () => setClock(Date.now());
+    const initialId = window.setTimeout(updateClock, 0);
+    const intervalId = window.setInterval(updateClock, 60_000);
+    return () => {
+      window.clearTimeout(initialId);
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const capturedTime = meta ? new Date(meta.capturedAt).getTime() : Number.NaN;
+  const ageMinutes = Number.isFinite(capturedTime) && clock !== null
+    ? Math.max(0, Math.floor((clock - capturedTime) / 60_000))
+    : null;
+
+  if (loading && !meta) return { tone: "checking", label: "확인 중", detail: "기준 시각 확인 중", ageMinutes };
+  if (ageMinutes === null) return { tone: "unavailable", label: "데이터 없음", detail: "실데이터 연결 필요", ageMinutes };
+  if (ageMinutes <= 30) return { tone: "fresh", label: "최신", detail: formatRelativeTime(meta?.capturedAt ?? null), ageMinutes };
+  if (ageMinutes <= 120) return { tone: "delayed", label: "지연 가능", detail: formatRelativeTime(meta?.capturedAt ?? null), ageMinutes };
+  return { tone: "stale", label: "오래됨", detail: formatRelativeTime(meta?.capturedAt ?? null), ageMinutes };
+}
 
 async function requestTrendingVideos(
   region: TrendRegion,
@@ -552,37 +585,14 @@ function CollectorStatusCard({ status, state }: {
 }
 
 
-function DataTrustPanel({ meta, regionLabel, categoryLabel, collectorStatus, collectorState, loading }: {
+function DataStatusControl({ meta, regionLabel, categoryLabel, collectorStatus, collectorState, freshness }: {
   meta: SnapshotMeta | null;
   regionLabel: string;
   categoryLabel?: string;
   collectorStatus: CollectorStatus | null;
   collectorState: "loading" | "ready" | "unavailable";
-  loading: boolean;
+  freshness: DataFreshness;
 }) {
-  const [clock, setClock] = useState<number | null>(null);
-  useEffect(() => {
-    const updateClock = () => setClock(Date.now());
-    const initialId = window.setTimeout(updateClock, 0);
-    const intervalId = window.setInterval(updateClock, 60_000);
-    return () => {
-      window.clearTimeout(initialId);
-      window.clearInterval(intervalId);
-    };
-  }, []);
-  const capturedTime = meta ? new Date(meta.capturedAt).getTime() : Number.NaN;
-  const ageMinutes = Number.isFinite(capturedTime) && clock !== null
-    ? Math.max(0, Math.floor((clock - capturedTime) / 60_000))
-    : null;
-  const freshness = loading && !meta
-    ? { tone: "checking", label: "데이터 확인 중", detail: "기준 시각 확인 중" }
-    : ageMinutes === null
-      ? { tone: "unavailable", label: "데이터 없음", detail: "실데이터 연결 필요" }
-      : ageMinutes <= 30
-        ? { tone: "fresh", label: "최신 데이터", detail: formatRelativeTime(meta?.capturedAt ?? null) }
-        : ageMinutes <= 120
-          ? { tone: "delayed", label: "지연 가능", detail: formatRelativeTime(meta?.capturedAt ?? null) }
-          : { tone: "stale", label: "오래된 데이터", detail: formatRelativeTime(meta?.capturedAt ?? null) };
   const run = collectorStatus?.latestRun;
   const originDetail = meta?.dataOrigin === "d1_snapshot"
     ? "D1에 저장된 YouTube 스냅샷"
@@ -602,18 +612,42 @@ function DataTrustPanel({ meta, regionLabel, categoryLabel, collectorStatus, col
         ? `${run.scopesSucceeded}/${run.scopesTotal}개 범위 · 마지막 성공 ${formatRelativeTime(collectorStatus?.lastSuccessAt ?? null)}`
         : "첫 예약 수집 대기";
 
-  return <section className={`data-trust ${freshness.tone}`} aria-label="데이터 신뢰 정보">
-    <div className="data-trust-shell">
+  return <Popover>
+    <PopoverTrigger asChild>
+      <button type="button" className={`data-status-trigger ${freshness.tone}`} aria-label={`데이터 상태: ${freshness.label}, ${freshness.detail}`}>
+        <i/><span>{freshness.label}</span><small>{freshness.detail}</small>
+      </button>
+    </PopoverTrigger>
+    <PopoverContent className={`data-status-popover ${freshness.tone}`} align="end" sideOffset={12} aria-label="데이터 신뢰 정보">
       <header><span><Check/> DATA STATUS</span><strong><i/>{freshness.label}</strong><small>{freshness.detail}</small></header>
       <dl>
         <div><dt>출처</dt><dd>YouTube Data API v3</dd><small>{originDetail}</small></div>
         <div><dt>분석 범위</dt><dd>{regionLabel} · {categoryLabel ?? "전체 인기"}</dd><small>국가·카테고리 기준</small></div>
-        <div><dt>스냅샷 기준 시각</dt><dd>{meta ? `${formatCapturedDateTime(meta.capturedAt)} KST` : "확인 중"}</dd><small>{ageMinutes === null ? "기준 시각 없음" : `${ageMinutes}분 경과`}</small></div>
+        <div><dt>스냅샷 기준 시각</dt><dd>{meta ? `${formatCapturedDateTime(meta.capturedAt)} KST` : "확인 중"}</dd><small>{freshness.ageMinutes === null ? "기준 시각 없음" : `${freshness.ageMinutes}분 경과`}</small></div>
         <div><dt>저장·수집</dt><dd>{historyDetail}</dd><small>{collectorDetail}</small></div>
       </dl>
       <p>YouTube 인기 목록의 시점 데이터이며, PulseTube의 속도·가속·Early 신호는 D1 수집 이력을 기반으로 계산합니다.</p>
-    </div>
-  </section>;
+    </PopoverContent>
+  </Popover>;
+}
+
+function DataStatusAlert({ freshness, collectorStatus, onRetry }: {
+  freshness: DataFreshness;
+  collectorStatus: CollectorStatus | null;
+  onRetry: () => void;
+}) {
+  const collectionFailed = collectorStatus?.latestRun?.status === "failed";
+  if (freshness.tone !== "delayed" && freshness.tone !== "stale" && !collectionFailed) return null;
+
+  const message = collectionFailed
+    ? "최근 예약 수집에 실패했습니다. 현재 데이터의 기준 시각을 확인해 주세요."
+    : freshness.tone === "stale"
+      ? `현재 스냅샷은 ${freshness.detail} 데이터입니다. 최신 흐름과 차이가 있을 수 있습니다.`
+      : `최근 스냅샷이 ${freshness.detail} 갱신되었습니다. 다음 수집이 지연될 수 있습니다.`;
+
+  return <div className={`data-alert ${freshness.tone}`} role="alert">
+    <AlertTriangle/><strong>{freshness.tone === "stale" || collectionFailed ? "데이터 확인 필요" : "수집 지연 가능"}</strong><span>{message}</span><button onClick={onRetry}>다시 확인</button>
+  </div>;
 }
 
 function HistoryPanel({ video, region, hours = 168, periodLabel = "7일" }: {
@@ -959,6 +993,9 @@ export default function Home() {
   );
   const activeCategory = YOUTUBE_CATEGORIES.find((category) => category.id === activeCategoryId) ?? null;
   const activeDataMeta = activeCategoryId ? categoryMetaCache[activeCategoryId] ?? null : liveMeta;
+  const statusMeta = activeTab === "home" ? activeDataMeta : liveMeta;
+  const statusCategoryLabel = activeTab === "home" ? activeCategory?.label : undefined;
+  const dataFreshness = useDataFreshness(statusMeta, dataLoading || (activeTab === "home" && categoryLoading));
   const categoryVideos = activeCategoryId ? categoryCache[activeCategoryId] : undefined;
   const visibleVideos = activeCategory ? categoryVideos ?? [] : allVideos;
   const categoryRow = activeCategory && categoryVideos
@@ -1069,15 +1106,6 @@ export default function Home() {
     ?? signalVideos.find((video) => (video.sampleCount ?? 1) >= 3 && (video.acceleration ?? 0) > 0);
   const isSignalLead = !selected && !activeCategory && !focus && Boolean(leadSignal);
   const heroVideo = selected ?? (activeCategory ? visibleVideos[0] : leadSignal) ?? visibleVideos[0] ?? allVideos[0];
-  const latestRun = collectorStatus?.latestRun;
-  const collectorLabel = collectorState === "loading"
-    ? "수집 상태 확인 중"
-    : collectorState === "unavailable"
-      ? "실시간 API · D1 미연결"
-      : !latestRun
-        ? "예약 수집 대기"
-        : `${latestRun.status === "success" ? "정상 수집" : latestRun.status === "partial" ? "부분 수집" : latestRun.status === "running" ? "수집 중" : "수집 실패"} · ${formatRelativeTime(latestRun.completedAt ?? latestRun.startedAt)}`;
-
   return <div className="trend-app" data-theme={theme}>
     <Tabs value={activeTab} onValueChange={setActiveTab} className="app-tabs">
       <header className="topbar">
@@ -1086,11 +1114,11 @@ export default function Home() {
         <div className="region-switch" aria-label="분석 국가 선택">
           {TREND_REGIONS.map((item) => <button key={item.code} className={region === item.code ? "active" : ""} onClick={() => selectRegion(item.code)}>{item.label}</button>)}
         </div>
-        <div className={`capture ${latestRun?.status ?? collectorState}`}><span/> {collectorLabel}</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
+        <DataStatusControl meta={statusMeta} regionLabel={activeRegion.label} categoryLabel={statusCategoryLabel} collectorStatus={collectorStatus} collectorState={collectorState} freshness={dataFreshness}/><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
         {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} isSignalLead={isSignalLead} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>}
-        <DataTrustPanel meta={activeDataMeta} regionLabel={activeRegion.label} categoryLabel={activeCategory?.label} collectorStatus={collectorStatus} collectorState={collectorState} loading={dataLoading || categoryLoading}/>
+        <DataStatusAlert freshness={dataFreshness} collectorStatus={collectorStatus} onRetry={()=>void refresh()}/>
         {selected&&<HistoryPanel video={selected} region={region}/>}
         {metricVideos.length>0&&<section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>현재</em></div><div><TrendingUp/><span>{(fastestAcceleration?.sampleCount ?? 1)>=3?"최대 조회 가속":"조회 속도"}</span><b>{(fastestAcceleration?.sampleCount ?? 1)>=3?accelerationText(fastestAcceleration):`${fmt(fastest.velocity)}/시`}</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>{activeCategory?"현재 분석 대상":"통합 신호 분석"}</span><b>{activeCategory?metricVideos.length:(signalFeed?.analysisCount??metricVideos.length)}개 영상</b><em>{!activeCategory&&signalFeed?`${signalFeed.scopeCount}개 범위`:"현재 피드"}</em></div></section>}
         <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
