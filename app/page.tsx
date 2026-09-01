@@ -36,6 +36,7 @@ type TrendingApiResponse = {
   region: TrendRegion;
   capturedAt: string;
   historyEnabled?: boolean;
+  dataOrigin?: "youtube_api" | "d1_snapshot";
   category: { id: string; label: string } | null;
   videos: TrendVideo[];
 };
@@ -134,6 +135,34 @@ type CollectorStatus = {
   } | null;
   lastSuccessAt: string | null;
 };
+
+type SnapshotMeta = {
+  source: "youtube";
+  capturedAt: string;
+  historyEnabled: boolean;
+  dataOrigin: "youtube_api" | "d1_snapshot" | null;
+  category: { id: string; label: string } | null;
+};
+
+const toSnapshotMeta = (response: TrendingApiResponse): SnapshotMeta => ({
+  source: response.source,
+  capturedAt: response.capturedAt,
+  historyEnabled: Boolean(response.historyEnabled),
+  dataOrigin: response.dataOrigin ?? null,
+  category: response.category,
+});
+
+const formatCapturedDateTime = (value: string) =>
+  new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Seoul",
+  }).format(new Date(value));
 
 const formatCapturedAt = (value: string) =>
   new Intl.DateTimeFormat("ko-KR", {
@@ -520,6 +549,61 @@ function CollectorStatusCard({ status, state }: {
   </div>;
 }
 
+
+function DataTrustPanel({ meta, regionLabel, categoryLabel, collectorStatus, collectorState, loading }: {
+  meta: SnapshotMeta | null;
+  regionLabel: string;
+  categoryLabel?: string;
+  collectorStatus: CollectorStatus | null;
+  collectorState: "loading" | "ready" | "unavailable";
+  loading: boolean;
+}) {
+  const capturedTime = meta ? new Date(meta.capturedAt).getTime() : Number.NaN;
+  const ageMinutes = Number.isFinite(capturedTime)
+    ? Math.max(0, Math.floor((Date.now() - capturedTime) / 60_000))
+    : null;
+  const freshness = loading && !meta
+    ? { tone: "checking", label: "데이터 확인 중", detail: "기준 시각 확인 중" }
+    : ageMinutes === null
+      ? { tone: "unavailable", label: "데이터 없음", detail: "실데이터 연결 필요" }
+      : ageMinutes <= 30
+        ? { tone: "fresh", label: "최신 데이터", detail: formatRelativeTime(meta?.capturedAt ?? null) }
+        : ageMinutes <= 120
+          ? { tone: "delayed", label: "지연 가능", detail: formatRelativeTime(meta?.capturedAt ?? null) }
+          : { tone: "stale", label: "오래된 데이터", detail: formatRelativeTime(meta?.capturedAt ?? null) };
+  const run = collectorStatus?.latestRun;
+  const originDetail = meta?.dataOrigin === "d1_snapshot"
+    ? "D1에 저장된 YouTube 스냅샷"
+    : meta?.dataOrigin === "youtube_api"
+      ? "Google API 직접 응답"
+      : "응답 경로 확인 중";
+  const historyDetail = meta?.historyEnabled
+    ? "D1 이력 저장 활성"
+    : collectorState === "unavailable"
+      ? "현재 응답만 제공"
+      : "이력 저장 확인 중";
+  const collectorDetail = collectorState === "loading"
+    ? "수집 상태 확인 중"
+    : collectorState === "unavailable"
+      ? "D1 수집기 미연결"
+      : run
+        ? `${run.scopesSucceeded}/${run.scopesTotal}개 범위 · 마지막 성공 ${formatRelativeTime(collectorStatus?.lastSuccessAt ?? null)}`
+        : "첫 예약 수집 대기";
+
+  return <section className={`data-trust ${freshness.tone}`} aria-label="데이터 신뢰 정보">
+    <div className="data-trust-shell">
+      <header><span><Check/> DATA STATUS</span><strong><i/>{freshness.label}</strong><small>{freshness.detail}</small></header>
+      <dl>
+        <div><dt>출처</dt><dd>YouTube Data API v3</dd><small>{originDetail}</small></div>
+        <div><dt>분석 범위</dt><dd>{regionLabel} · {categoryLabel ?? "전체 인기"}</dd><small>국가·카테고리 기준</small></div>
+        <div><dt>스냅샷 기준 시각</dt><dd>{meta ? `${formatCapturedDateTime(meta.capturedAt)} KST` : "확인 중"}</dd><small>{ageMinutes === null ? "기준 시각 없음" : `${ageMinutes}분 경과`}</small></div>
+        <div><dt>저장·수집</dt><dd>{historyDetail}</dd><small>{collectorDetail}</small></div>
+      </dl>
+      <p>YouTube 인기 목록의 시점 데이터이며, PulseTube의 속도·가속·Early 신호는 D1 수집 이력을 기반으로 계산합니다.</p>
+    </div>
+  </section>;
+}
+
 function HistoryPanel({ video, region, hours = 168, periodLabel = "7일" }: {
   video: TrendVideo;
   region: TrendRegion;
@@ -749,6 +833,8 @@ export default function Home() {
   const [themeOpen, setThemeOpen] = useState(false);
   const [theme, setTheme] = useState("neon");
   const [updatedAt, setUpdatedAt] = useState("--:--");
+  const [liveMeta, setLiveMeta] = useState<SnapshotMeta | null>(null);
+  const [categoryMetaCache, setCategoryMetaCache] = useState<Record<string, SnapshotMeta>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [liveVideos, setLiveVideos] = useState<TrendVideo[] | null>(null);
   const [signalFeed, setSignalFeed] = useState<SignalFeedResponse | null>(null);
@@ -779,6 +865,7 @@ export default function Home() {
       try {
         const data = await requestTrendingVideos(region, undefined, controller.signal);
         setLiveVideos(data.videos);
+        setLiveMeta(toSnapshotMeta(data));
         setUpdatedAt(formatCapturedAt(data.capturedAt));
         setDataError(null);
       } catch (error: unknown) {
@@ -840,8 +927,10 @@ export default function Home() {
     setFocus(null);
     setActiveCategoryId(null);
     setCategoryCache({});
+    setCategoryMetaCache({});
     setCategoryError(null);
     setLiveVideos(null);
+    setLiveMeta(null);
     setSignalFeed(null);
     setDataError(null);
     setDataLoading(true);
@@ -857,6 +946,7 @@ export default function Home() {
     [activeRegion.label, allVideos],
   );
   const activeCategory = YOUTUBE_CATEGORIES.find((category) => category.id === activeCategoryId) ?? null;
+  const activeDataMeta = activeCategoryId ? categoryMetaCache[activeCategoryId] ?? null : liveMeta;
   const categoryVideos = activeCategoryId ? categoryCache[activeCategoryId] : undefined;
   const visibleVideos = activeCategory ? categoryVideos ?? [] : allVideos;
   const categoryRow = activeCategory && categoryVideos
@@ -906,6 +996,7 @@ export default function Home() {
     try {
       const data = await requestTrendingVideos(region, categoryId);
       setCategoryCache((current) => ({ ...current, [categoryId]: data.videos }));
+      setCategoryMetaCache((current) => ({ ...current, [categoryId]: toSnapshotMeta(data) }));
       setUpdatedAt(formatCapturedAt(data.capturedAt));
     } catch (error) {
       setCategoryError(error instanceof Error ? error.message : "카테고리 데이터를 불러오지 못했습니다.");
@@ -920,10 +1011,13 @@ export default function Home() {
       const data = await requestTrendingVideos(region, activeCategoryId ?? undefined);
       if (activeCategoryId) {
         setCategoryCache((current) => ({ ...current, [activeCategoryId]: data.videos }));
+        setCategoryMetaCache((current) => ({ ...current, [activeCategoryId]: toSnapshotMeta(data) }));
         setCategoryError(null);
       } else {
         setLiveVideos(data.videos);
+        setLiveMeta(toSnapshotMeta(data));
         setCategoryCache({});
+        setCategoryMetaCache({});
         setDataError(null);
       }
       setSelected(null);
@@ -983,7 +1077,9 @@ export default function Home() {
         <div className={`capture ${latestRun?.status ?? collectorState}`}><span/> {collectorLabel}</div><div className="top-actions"><button onClick={refresh} aria-label="새로고침"><RefreshCw className={refreshing?"spin":""}/><span>새로고침</span></button><button onClick={()=>setThemeOpen(true)} aria-label="테마"><Palette/><span>테마</span></button></div>
       </header>
       <TabsContent value="home" className="tab-content">
-        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} isSignalLead={isSignalLead} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>} {selected&&<HistoryPanel video={selected} region={region}/>}
+        {heroVideo ? <Hero video={heroVideo} isSelection={Boolean(selected)} isSignalLead={isSignalLead} onClear={()=>setSelected(null)} scopeLabel={categoryVideos ? activeCategory?.label : undefined} regionLabel={activeRegion.label}/> : <DataUnavailableHero loading={dataLoading} error={dataError} refreshing={refreshing} onRetry={()=>void refresh()} regionLabel={activeRegion.label}/>}
+        <DataTrustPanel meta={activeDataMeta} regionLabel={activeRegion.label} categoryLabel={activeCategory?.label} collectorStatus={collectorStatus} collectorState={collectorState} loading={dataLoading || categoryLoading}/>
+        {selected&&<HistoryPanel video={selected} region={region}/>}
         {metricVideos.length>0&&<section className="insight-band" aria-label="현재 스냅샷"><div><Flame/><span>음악 비중</span><b>{musicShare}%</b><em>현재</em></div><div><TrendingUp/><span>{(fastestAcceleration?.sampleCount ?? 1)>=3?"최대 조회 가속":"조회 속도"}</span><b>{(fastestAcceleration?.sampleCount ?? 1)>=3?accelerationText(fastestAcceleration):`${fmt(fastest.velocity)}/시`}</b></div><div><Radio/><span>가장 많은 분야</span><b>{dominantCategory}</b></div><div><Database/><span>{activeCategory?"현재 분석 대상":"통합 신호 분석"}</span><b>{activeCategory?metricVideos.length:(signalFeed?.analysisCount??metricVideos.length)}개 영상</b><em>{!activeCategory&&signalFeed?`${signalFeed.scopeCount}개 범위`:"현재 피드"}</em></div></section>}
         <div className="home-layout"><aside className="sidebar"><button className={focus===null&&!activeCategory?"active":""} onClick={showHome}><span>⌂</span> 홈</button>
           {groups.map((group)=>{const groupRows=baseRows.filter((row)=>row.group===group);if(!groupRows.length)return null;return <Fragment key={group}><h3>{group}</h3>{groupRows.map((row)=><button key={row.id} className={!activeCategory&&focus===row.id?"active":""} onClick={()=>selectRow(row.id)}>{row.label}</button>)}</Fragment>})}

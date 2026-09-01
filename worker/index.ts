@@ -295,6 +295,7 @@ const trendingResponse = (
   capturedAt: string,
   videos: TrendSnapshotVideo[],
   historyEnabled: boolean,
+  dataOrigin: "youtube_api" | "d1_snapshot",
 ) =>
   jsonResponse(
     {
@@ -305,6 +306,7 @@ const trendingResponse = (
         : null,
       capturedAt,
       historyEnabled,
+      dataOrigin,
       videos,
     },
     200,
@@ -363,6 +365,7 @@ async function handleYouTubeTrending(
           stored.capturedAt,
           stored.videos,
           true,
+          "d1_snapshot",
         );
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
         return response;
@@ -397,6 +400,7 @@ async function handleYouTubeTrending(
     collected.capturedAt,
     collected.videos,
     collected.stored,
+    "youtube_api",
   );
 
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
